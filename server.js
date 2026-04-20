@@ -146,6 +146,19 @@ async function fetchLead(leadId) {
   }
 }
 
+async function fetchProgram(programId) {
+  if (!programId) return null;
+  try {
+    const data = await adleadGet(`/programs/${programId}`, { allow404: true });
+    if (data) console.log(`[fetchProgram] OK — program ${programId} → "${data.name || data.nom_commercial || '(sans nom)'}"`);
+    else console.log(`[fetchProgram] 404 sur /programs/${programId}`);
+    return data;
+  } catch (e) {
+    console.log(`[fetchProgram] erreur: ${e.message}`);
+    return null;
+  }
+}
+
 async function fetchInterest(interestId, { programId, leadId } = {}) {
   // Try several plausible endpoint shapes — Adlead uses nested resources under programs.
   const candidates = [];
@@ -434,11 +447,19 @@ async function processPendingLead(entry) {
       });
     }
 
-    // Lookup programme dans programmes.json → accroche personnalisée
-    const programName = interest.program?.name || `Programme #${entry.programId}`;
+    // Résoudre le nom du programme : d'abord depuis l'interest, sinon via fetchProgram
+    let programApi = interest.program || null;
+    let programName = programApi?.name || null;
+    if (!programName && entry.programId) {
+      programApi = await fetchProgram(entry.programId);
+      programName = programApi?.name || programApi?.nom_commercial || null;
+    }
+    if (!programName) programName = `Programme #${entry.programId}`;
+
+    // Lookup programme dans programmes.json (keyé par nom) → accroche personnalisée
     const programme = findProgramme(programName);
-    const ville = (programme && programme.ville) || interest.program?.city || '';
-    const promoteur = (programme && programme.promoteur) || interest.program?.developer?.name || '';
+    const ville = (programme && programme.ville) || programApi?.city || programApi?.ville || '';
+    const promoteur = (programme && programme.promoteur) || programApi?.developer?.name || programApi?.promoteur || '';
     const accroche = (programme && programme.accroche) || '';
 
     const ctx = {
