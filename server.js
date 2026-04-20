@@ -340,38 +340,68 @@ async function processPendingLead(entry) {
   try {
     // 1. Récupérer le lead (avec include=interests si supporté) — sert pour les contacts et potentiellement pour lire l'interest embarqué
     const lead = await fetchLead(entry.leadId);
-
-    // 2. Récupérer l'interest — d'abord depuis le payload lead si présent, sinon via l'API en essayant plusieurs endpoints
-    let interest = findInterest(lead, entry.interestId);
-    if (interest) {
-      console.log(`[fetchInterest] trouvé dans lead.interests (id=${interest.id})`);
+    console.log(`[debug] lead ${entry.leadId} — keys: ${Object.keys(lead || {}).join(',')}`);
+    // Essaie plusieurs variantes de nommage pour le sous-champ interests
+    const maybeInterestsArr = lead?.interests || lead?.interest || lead?.program_interests || lead?.programs || null;
+    if (Array.isArray(maybeInterestsArr)) {
+      console.log(`[debug] lead.interests array length=${maybeInterestsArr.length}, premier element keys: ${Object.keys(maybeInterestsArr[0] || {}).join(',')}`);
     } else {
+      console.log(`[debug] pas de champ interests/programs trouvé dans le lead`);
+    }
+
+    // 2. Récupérer l'interest — plusieurs sources possibles
+    //    (a) via lead.interests si l'include a marché
+    //    (b) via /interests/X ou /programs/X/interests/X ou /leads/X/interests/X
+    //    (c) fallback: depuis le rawPayload du webhook (figé à T0 mais contient tout ce qu'on a besoin)
+    let interest = findInterest(lead, entry.interestId);
+    let interestSource = interest ? 'lead.interests' : null;
+    if (!interest) {
       try {
         interest = await fetchInterest(entry.interestId, {
           programId: entry.programId,
           leadId: entry.leadId,
         });
+        if (interest) interestSource = 'api';
       } catch (e) {
-        console.error(`[fetchInterest] tous les endpoints ont échoué: ${e.message}`);
-        interest = null;
+        console.log(`[fetchInterest] tous les endpoints ont échoué: ${e.message}`);
       }
     }
-
+    if (!interest) {
+      // Fallback final : utiliser le payload original du webhook
+      interest = entry.rawPayload?.data || null;
+      if (interest) interestSource = 'rawPayload (webhook T0)';
+    }
     if (!interest) {
       return finalize({
         id: entry.interestId,
         status: 'error',
-        error: `Interest ${entry.interestId} introuvable (ni dans lead ${entry.leadId}, ni via API)`,
+        error: `Interest ${entry.interestId} introuvable (aucune source disponible)`,
       });
     }
-    console.log(`[debug] interest ${entry.interestId} — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
+    console.log(`[debug] interest ${entry.interestId} (source=${interestSource}) — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
 
-    if (interest.status !== 'to-process') {
-      console.log(`[process] lead ${entry.leadId} / interest ${entry.interestId} — statut = ${interest.status} → le commercial a traité, on n'envoie pas`);
+    // Détection "commercial a pris la main"
+    //   - Soit le status de l'interest n'est plus "to-process" (si on a pu le relire)
+    //   - Soit le lead a eu une interaction postérieure à receivedAt (fallback quand rawPayload est figé)
+    let commercialActed = false;
+    let reason = '';
+    if (interestSource !== 'rawPayload (webhook T0)' && interest.status && interest.status !== 'to-process') {
+      commercialActed = true;
+      reason = `Statut interest = "${interest.status}"`;
+    } else if (lead.last_interaction_at && entry.receivedAt) {
+      const li = new Date(lead.last_interaction_at).getTime();
+      const rc = new Date(entry.receivedAt).getTime();
+      if (li > rc + 60_000) { // marge 1 min pour ignorer l'événement de création
+        commercialActed = true;
+        reason = `last_interaction_at (${lead.last_interaction_at}) postérieur à receivedAt (${entry.receivedAt})`;
+      }
+    }
+    if (commercialActed) {
+      console.log(`[process] lead ${entry.leadId} / interest ${entry.interestId} — commercial a agi: ${reason} → on n'envoie pas`);
       return finalize({
         id: entry.interestId,
         status: 'cancelled',
-        reason: `Statut changé à "${interest.status}" (commercial a pris la main)`,
+        reason,
         contactName: lead.contacts?.[0]?.fullname || '',
         email: lead.contacts?.[0]?.email_primary || '',
         programId: entry.programId,
