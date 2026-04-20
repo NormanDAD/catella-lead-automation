@@ -120,7 +120,7 @@ function verifyAdleadSignature(req) {
   return hash === signature;
 }
 
-async function adleadGet(path) {
+async function adleadGet(path, { allow404 = false } = {}) {
   const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}${path}`;
   const res = await fetch(url, {
     headers: {
@@ -128,20 +128,46 @@ async function adleadGet(path) {
       'Accept': 'application/json',
     },
   });
+  if (res.status === 404 && allow404) return null;
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Adlead API ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+    throw new Error(`Adlead API ${res.status} ${res.statusText} on ${path}: ${text.slice(0, 200)}`);
   }
   const json = await res.json();
   return json.data || json;
 }
 
 async function fetchLead(leadId) {
-  return adleadGet(`/leads/${leadId}`);
+  // Try with includes for interests so we can read status from there
+  try {
+    return await adleadGet(`/leads/${leadId}?include=interests,interests.program,contacts`);
+  } catch (e) {
+    return adleadGet(`/leads/${leadId}`);
+  }
 }
 
-async function fetchInterest(interestId) {
-  return adleadGet(`/interests/${interestId}`);
+async function fetchInterest(interestId, { programId, leadId } = {}) {
+  // Try several plausible endpoint shapes — Adlead uses nested resources under programs.
+  const candidates = [];
+  if (programId) candidates.push(`/programs/${programId}/interests/${interestId}`);
+  if (leadId) candidates.push(`/leads/${leadId}/interests/${interestId}`);
+  candidates.push(`/interests/${interestId}`);
+  let lastError = null;
+  for (const path of candidates) {
+    try {
+      const data = await adleadGet(path, { allow404: true });
+      if (data) {
+        console.log(`[fetchInterest] OK via ${path}`);
+        return data;
+      }
+      console.log(`[fetchInterest] 404 sur ${path}`);
+    } catch (e) {
+      lastError = e;
+      console.log(`[fetchInterest] erreur sur ${path}: ${e.message}`);
+    }
+  }
+  if (lastError) throw lastError;
+  return null;
 }
 
 function findInterest(lead, interestId) {
@@ -312,19 +338,33 @@ async function processPendingLead(entry) {
   savePending();
 
   try {
-    // 1. Récupérer l'interest directement pour connaître son status courant
-    const interest = await fetchInterest(entry.interestId);
+    // 1. Récupérer le lead (avec include=interests si supporté) — sert pour les contacts et potentiellement pour lire l'interest embarqué
+    const lead = await fetchLead(entry.leadId);
+
+    // 2. Récupérer l'interest — d'abord depuis le payload lead si présent, sinon via l'API en essayant plusieurs endpoints
+    let interest = findInterest(lead, entry.interestId);
+    if (interest) {
+      console.log(`[fetchInterest] trouvé dans lead.interests (id=${interest.id})`);
+    } else {
+      try {
+        interest = await fetchInterest(entry.interestId, {
+          programId: entry.programId,
+          leadId: entry.leadId,
+        });
+      } catch (e) {
+        console.error(`[fetchInterest] tous les endpoints ont échoué: ${e.message}`);
+        interest = null;
+      }
+    }
+
     if (!interest) {
       return finalize({
         id: entry.interestId,
         status: 'error',
-        error: `Interest ${entry.interestId} introuvable via API`,
+        error: `Interest ${entry.interestId} introuvable (ni dans lead ${entry.leadId}, ni via API)`,
       });
     }
     console.log(`[debug] interest ${entry.interestId} — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
-
-    // 2. Récupérer le lead pour les contacts
-    const lead = await fetchLead(entry.leadId);
 
     if (interest.status !== 'to-process') {
       console.log(`[process] lead ${entry.leadId} / interest ${entry.interestId} — statut = ${interest.status} → le commercial a traité, on n'envoie pas`);
