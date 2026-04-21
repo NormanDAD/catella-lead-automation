@@ -773,36 +773,53 @@ app.post('/api/test/process-now', async (req, res) => {
   const leadId = req.query.leadId || req.body?.leadId;
   let interestId = req.query.interestId || req.body?.interestId;
   let programId = req.query.programId || req.body?.programId;
-  const force = String(req.query.force || req.body?.force || '').toLowerCase() === '1'
-             || String(req.query.force || req.body?.force || '').toLowerCase() === 'true';
+  const force = String(req.query.force || req.body?.force || '').toLowerCase() !== '0'
+             && String(req.query.force || req.body?.force || '').toLowerCase() !== 'false';
   if (!leadId) {
     return res.status(400).json({ error: 'leadId requis (query ou body)' });
   }
-  // Si interestId manquant, on le déduit depuis le lead
+  // Tente de déduire interestId depuis le lead ; si l'API n'expose pas les interests,
+  // on fabrique un interestId synthétique et un rawPayload minimal pour que processPendingLead
+  // puisse tout de même envoyer le mail client.
   if (!interestId) {
     try {
       const lead = await fetchLead(String(leadId));
       const interests = lead?.interests || lead?.interest || lead?.program_interests || lead?.programs || [];
-      if (!Array.isArray(interests) || interests.length === 0) {
-        return res.status(400).json({
-          error: 'interestId manquant et aucun interest trouvé sur le lead',
-          leadKeys: Object.keys(lead || {}),
-        });
+      if (Array.isArray(interests) && interests.length > 0) {
+        interestId = interests[0].id;
+        if (!programId) programId = interests[0].program_id || interests[0].program?.id;
+        console.log(`[process-now] interestId déduit=${interestId}, programId=${programId} (depuis lead ${leadId})`);
+      } else {
+        interestId = `test-synthetic-${leadId}-${Date.now()}`;
+        console.log(`[process-now] aucun interest dans l'API — interestId synthétique ${interestId}`);
       }
-      interestId = interests[0].id;
-      if (!programId) programId = interests[0].program_id || interests[0].program?.id;
-      console.log(`[process-now] interestId déduit=${interestId}, programId=${programId} (depuis lead ${leadId})`);
     } catch (e) {
-      return res.status(500).json({ error: `Impossible de fetch lead ${leadId}: ${e.message}` });
+      interestId = `test-synthetic-${leadId}-${Date.now()}`;
+      console.log(`[process-now] fetchLead erreur (${e.message}) — interestId synthétique ${interestId}`);
     }
   }
+  // rawPayload synthétique : si fetchInterest échoue côté Adlead, processPendingLead
+  // fait un fallback sur entry.rawPayload.data (c'est exactement le chemin "webhook T0").
+  const rawPayload = {
+    event: 'interest:created',
+    data: {
+      id: interestId,
+      lead_id: String(leadId),
+      program_id: programId ? String(programId) : null,
+      status: 'to-process',
+      context: {
+        lead_id: String(leadId),
+        program_id: programId ? String(programId) : null,
+      },
+    },
+  };
   const entry = {
     interestId: String(interestId),
     leadId: String(leadId),
     programId: programId ? String(programId) : null,
     receivedAt: new Date().toISOString(),
     checkAt: new Date().toISOString(),
-    rawPayload: null,
+    rawPayload,
     attempts: 0,
     maxAttempts: 1,
     force,
