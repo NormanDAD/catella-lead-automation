@@ -19,8 +19,24 @@ const CONFIG = {
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
   SCHEDULER_INTERVAL_MS: Number(process.env.SCHEDULER_INTERVAL_MS || 5 * 60 * 1000),
+  // Liste d'IDs de programmes (CSV) où Norman est le commercial et traite lui-même
+  // les leads immédiatement. Pour ces programmes :
+  //   - checkAt = maintenant (traitement au prochain tick scheduler, < 5 min)
+  //   - force = true (bypass check "commercial a pris la main")
+  INSTANT_PROGRAM_IDS:   String(process.env.INSTANT_PROGRAM_IDS || '')
+                           .split(',')
+                           .map(s => s.trim())
+                           .filter(Boolean),
   PORT:                  process.env.PORT || 3000,
 };
+
+// Set pour lookup O(1) dans enqueueLead
+const INSTANT_PROGRAM_SET = new Set(CONFIG.INSTANT_PROGRAM_IDS);
+if (INSTANT_PROGRAM_SET.size > 0) {
+  console.log(`[config] Programmes en envoi IMMÉDIAT (sans délai 24h): ${[...INSTANT_PROGRAM_SET].join(', ')}`);
+} else {
+  console.log(`[config] Aucun programme en envoi immédiat — tous les leads attendent ${CONFIG.DELAY_HOURS}h`);
+}
 
 // ─── PROGRAMMES DATA ───────────────────────────────────────────────────────
 // Chargé depuis programmes.json au démarrage.
@@ -441,20 +457,37 @@ function enqueueLead(payload) {
   const leadId = data.lead_id || data.leadId || data.context?.lead_id;
   const programId = data.program_id || data.programId || data.context?.program_id;
 
+  // Envoi immédiat si le programme est dans INSTANT_PROGRAM_IDS
+  // (cas : Norman est lui-même le commercial sur ce programme, pas besoin d'attendre 24h)
+  const isInstant = programId && INSTANT_PROGRAM_SET.has(String(programId));
+  const checkAt = isInstant
+    ? new Date().toISOString()
+    : new Date(Date.now() + CONFIG.DELAY_HOURS * 60 * 60 * 1000).toISOString();
+
   const entry = {
     interestId,
     leadId,
     programId,
     receivedAt: new Date().toISOString(),
-    checkAt: new Date(Date.now() + CONFIG.DELAY_HOURS * 60 * 60 * 1000).toISOString(),
+    checkAt,
     rawPayload: payload,
     attempts: 0,
     maxAttempts: 3,
+    // Si programme instant : bypass le check "commercial a pris la main"
+    // (puisque TU es le commercial et que tu n'auras pas agi en quelques secondes)
+    force: isInstant ? true : undefined,
+    instant: isInstant ? true : undefined,
   };
 
   pendingLeads.push(entry);
   savePending();
-  console.log(`[enqueue] Lead ${leadId} (interest ${interestId}) en attente — check à ${entry.checkAt}`);
+  if (isInstant) {
+    console.log(`[enqueue] Lead ${leadId} (programme ${programId} INSTANT) — envoi au prochain tick scheduler (< ${Math.round(CONFIG.SCHEDULER_INTERVAL_MS / 1000)}s)`);
+    // Déclenche un tick immédiat pour ne pas attendre l'intervalle complet
+    setImmediate(() => schedulerTick().catch(e => console.error('[enqueue→tick] erreur:', e.message)));
+  } else {
+    console.log(`[enqueue] Lead ${leadId} (interest ${interestId}) en attente — check à ${entry.checkAt}`);
+  }
   return entry;
 }
 
@@ -697,6 +730,11 @@ app.get('/api/health', (req, res) => {
     pending: pendingLeads.length,
     processed: processedLeads.length,
     programmes: Object.keys(PROGRAMMES).length,
+    config: {
+      delayHours: CONFIG.DELAY_HOURS,
+      schedulerIntervalMs: CONFIG.SCHEDULER_INTERVAL_MS,
+      instantProgramIds: [...INSTANT_PROGRAM_SET],
+    },
     persistence: {
       dataDir: DATA_DIR,
       dataDirFromEnv: !!process.env.DATA_DIR,
