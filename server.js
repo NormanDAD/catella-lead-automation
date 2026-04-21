@@ -187,20 +187,20 @@ async function updateLeadStatusPending(programId, leadId) {
   });
 }
 
-// Log an "E-mail envoyé" event on the lead (trace un événement passé, pas une action planifiée)
-//   Endpoint capturé côté UI : POST /programs/{pid}/leads/{lid}/records
-//   body: { occurred_at: "YYYY-MM-DD HH:MM:SS", event: "email", comment: "..." }
-async function createRelanceEvent(programId, leadId) {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const occurred_at =
-    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-  const dateFr = now.toLocaleDateString('fr-FR');
-  return adleadPost(`/programs/${programId}/leads/${leadId}/records`, {
-    occurred_at,
-    event: 'email',
-    comment: `Relance automatique J+1 envoyée le ${dateFr}`,
+// Créer une sales-action "Traité - Relance J+1" sur le lead (colonne SUIVI COMMERCIAL Adlead)
+//   Endpoint : POST /programs/{pid}/leads/{lid}/sales-actions
+//   NB: endpoint /records (colonne Événements) PAS exposé via X-API-Key → on utilise /sales-actions.
+async function createRelanceSalesAction(programId, leadId) {
+  const today = new Date().toLocaleDateString('fr-FR');
+  return adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
+    owner_assignment: 'interest-owner',
+    user_id: null,
+    type: 'other',
+    priority: 'medium',
+    due_at: null,
+    scheduled_at: null,
+    comment: `Traité — Relance automatique J+1 envoyée le ${today}`,
+    status: 'pending',
   });
 }
 
@@ -568,11 +568,11 @@ async function processPendingLead(entry) {
       console.error(`[process] ⚠️ échec MAJ statut Adlead lead ${entry.leadId}: ${e.message}`);
     }
     try {
-      await createRelanceEvent(entry.programId, entry.leadId);
-      console.log(`[process] ✅ event "E-mail envoyé" créé sur lead ${entry.leadId} (Relance J+1)`);
+      await createRelanceSalesAction(entry.programId, entry.leadId);
+      console.log(`[process] ✅ sales-action Adlead créée sur lead ${entry.leadId} (Relance J+1)`);
     } catch (e) {
       adleadActionError = e.message;
-      console.error(`[process] ⚠️ échec création event Adlead lead ${entry.leadId}: ${e.message}`);
+      console.error(`[process] ⚠️ échec création sales-action Adlead lead ${entry.leadId}: ${e.message}`);
     }
 
     return finalize({
@@ -703,14 +703,14 @@ app.post('/api/test/adlead-update', async (req, res) => {
   if (!programId || !leadId) {
     return res.status(400).json({ error: 'programId et leadId requis (query ou body)' });
   }
-  const result = { programId, leadId, putStatus: null, postEvent: null, errors: {} };
+  const result = { programId, leadId, putStatus: null, postSalesAction: null, errors: {} };
   try {
     result.putStatus = await updateLeadStatusPending(programId, leadId);
   } catch (e) {
     result.errors.put = e.message;
   }
   try {
-    result.postEvent = await createRelanceEvent(programId, leadId);
+    result.postSalesAction = await createRelanceSalesAction(programId, leadId);
   } catch (e) {
     result.errors.post = e.message;
   }
