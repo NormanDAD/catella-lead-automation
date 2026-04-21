@@ -692,6 +692,30 @@ app.post('/api/scheduler/run', async (req, res) => {
   res.json({ triggered: true, pending: pendingLeads.length });
 });
 
+// Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
+// Usage : POST /api/test/adlead-update?programId=X&leadId=Y
+// Permet de vérifier les deux appels API Adlead sans repasser par le pipeline complet.
+app.post('/api/test/adlead-update', async (req, res) => {
+  const programId = req.query.programId || req.body?.programId;
+  const leadId = req.query.leadId || req.body?.leadId;
+  if (!programId || !leadId) {
+    return res.status(400).json({ error: 'programId et leadId requis (query ou body)' });
+  }
+  const result = { programId, leadId, putStatus: null, postSalesAction: null, errors: {} };
+  try {
+    result.putStatus = await updateLeadStatusPending(programId, leadId);
+  } catch (e) {
+    result.errors.put = e.message;
+  }
+  try {
+    result.postSalesAction = await createRelanceSalesAction(programId, leadId);
+  } catch (e) {
+    result.errors.post = e.message;
+  }
+  const ok = !result.errors.put && !result.errors.post;
+  res.status(ok ? 200 : 500).json(result);
+});
+
 app.post('/webhook/adlead', (req, res) => {
   if (!verifyAdleadSignature(req)) {
     console.warn('[webhook] Signature invalide');
