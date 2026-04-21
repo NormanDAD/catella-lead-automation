@@ -14,6 +14,8 @@ const CONFIG = {
   POWER_AUTOMATE_URL:    process.env.POWER_AUTOMATE_URL || '',
   POWER_AUTOMATE_SECRET: process.env.POWER_AUTOMATE_SECRET || '',
   SENDER_EMAIL:          process.env.SENDER_EMAIL || 'norman.dadon@catella.com',
+  INTERNAL_NOTIF_EMAIL:  process.env.INTERNAL_NOTIF_EMAIL || 'norman.dadon@catella.com',
+  ADLEAD_UI_BASE:        process.env.ADLEAD_UI_BASE || 'https://crm.adlead.immo/catella',
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
   SCHEDULER_INTERVAL_MS: Number(process.env.SCHEDULER_INTERVAL_MS || 5 * 60 * 1000),
@@ -175,17 +177,11 @@ async function adleadPost(path, body) {
   return json.data || json;
 }
 
-// Update lead interest status (passage à "En attente de contact" = pending)
-async function updateLeadStatusPending(programId, leadId) {
-  return adleadPut(`/programs/${programId}/leads/${leadId}`, {
-    interest: {
-      status: 'pending',
-      follow_reason: null,
-      discard_reason: null,
-      deleted_at: null,
-    },
-  });
-}
+// NB: il n'existe PAS d'endpoint documenté dans l'API v1 Adlead pour modifier le statut
+// d'un lead (ni PUT ni PATCH — confirmé par la doc https://docs.adlead.immo/v1/leads.html
+// qui expose uniquement POST pour l'ajout et GET pour la lecture). Le PUT /leads/{id}
+// qu'on essayait avant renvoyait 500 car l'endpoint n'existe simplement pas côté Adlead.
+// Le statut sera posé manuellement par le commercial via l'UI (notif email l'y invite).
 
 // Créer une sales-action "Traité - Relance J+1" sur le lead (colonne SUIVI COMMERCIAL Adlead)
 //   Endpoint : POST /programs/{pid}/leads/{lid}/sales-actions
@@ -205,6 +201,35 @@ async function createRelanceSalesAction(programId, leadId) {
     priority: 'medium',
     comment: `Traité — Relance automatique J+1 envoyée le ${today}`,
   });
+}
+
+// Notification interne à Norman : après l'envoi auto du mail client, on lui envoie
+// un mail "à la main" avec le lien Adlead du lead à traiter manuellement
+// (puisque la MAJ statut et la création d'event côté Adlead sont bloquées via l'API).
+function buildAdleadLeadUrl(programId, leadId) {
+  return `${CONFIG.ADLEAD_UI_BASE}/programs/${programId}/contact-management/leads/${leadId}`;
+}
+
+async function sendInternalNotif({ programId, leadId, contactName, contactEmail, programName }) {
+  const to = CONFIG.INTERNAL_NOTIF_EMAIL;
+  const when = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+  const adleadUrl = buildAdleadLeadUrl(programId, leadId);
+  const subject = `[Catella — Relance auto] ${programName || 'Programme inconnu'} — ${contactName || contactEmail}`;
+  const html = `
+<!doctype html>
+<html lang="fr"><body style="font-family: Arial, sans-serif; font-size: 14px; color: #222; line-height: 1.55;">
+  <p>Bonjour Norman,</p>
+  <p>Un lead a été relancé automatiquement à <strong>${when}</strong> et reste à traiter dans Adlead :</p>
+  <ul style="list-style: none; padding-left: 0;">
+    <li>• <strong>Contact</strong> : ${contactName || '(nom inconnu)'}</li>
+    <li>• <strong>Email</strong> : ${contactEmail || '(email inconnu)'}</li>
+    <li>• <strong>Programme</strong> : ${programName || '(programme inconnu)'}</li>
+    <li>• <strong>Lien Adlead</strong> : <a href="${adleadUrl}">${adleadUrl}</a></li>
+  </ul>
+  <p>Merci de poser l'action "E-mail envoyé" dans la timeline du lead.</p>
+  <p style="color: #888; font-size: 12px;">— Pipeline Catella Lead Automation</p>
+</body></html>`;
+  return sendEmailViaPowerAutomate(to, subject, html);
 }
 
 async function fetchLead(leadId) {
@@ -558,24 +583,34 @@ async function processPendingLead(entry) {
     await sendEmailViaPowerAutomate(email, subject, htmlBody);
     console.log(`[process] ✅ email envoyé à ${email} — "${subject}" (accroche: ${accroche ? 'oui' : 'non'})`);
 
-    // ── MAJ Adlead post-envoi : statut "En attente de contact" + action "Relance J+1 envoyée"
-    //    Chaque appel est isolé dans son try/catch : une erreur Adlead ne doit PAS
-    //    invalider le succès de l'envoi email.
-    let adleadUpdateError = null;
+    // ── Notif interne à Norman : mail avec lien Adlead pour qu'il pose l'action à la main
+    //    (l'API v1 Adlead n'expose pas d'endpoint pour modifier un lead / créer un event
+    //    dans la colonne Événements — voir docs.adlead.immo/v1/leads.html).
+    let internalNotifError = null;
+    try {
+      await sendInternalNotif({
+        programId: entry.programId,
+        leadId: entry.leadId,
+        contactName: contact.fullname || '',
+        contactEmail: email,
+        programName,
+      });
+      console.log(`[process] ✅ notif interne envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL} (lead ${entry.leadId})`);
+    } catch (e) {
+      internalNotifError = e.message;
+      console.error(`[process] ⚠️ échec notif interne lead ${entry.leadId}: ${e.message}`);
+    }
+
+    // ── Best-effort sales-action Adlead (si un jour l'API se débloque, on aura la trace
+    //    auto en bonus — pour l'instant ça échoue en 500 mais c'est silencieux et non bloquant).
     let adleadActionError = null;
     try {
-      await updateLeadStatusPending(entry.programId, entry.leadId);
-      console.log(`[process] ✅ statut Adlead lead ${entry.leadId} → "pending" (En attente de contact)`);
-    } catch (e) {
-      adleadUpdateError = e.message;
-      console.error(`[process] ⚠️ échec MAJ statut Adlead lead ${entry.leadId}: ${e.message}`);
-    }
-    try {
       await createRelanceSalesAction(entry.programId, entry.leadId);
-      console.log(`[process] ✅ sales-action Adlead créée sur lead ${entry.leadId} (Relance J+1)`);
+      console.log(`[process] ✅ sales-action Adlead créée sur lead ${entry.leadId}`);
     } catch (e) {
       adleadActionError = e.message;
-      console.error(`[process] ⚠️ échec création sales-action Adlead lead ${entry.leadId}: ${e.message}`);
+      // Silencieux en prod : on log en debug seulement pour pas polluer les logs à chaque lead.
+      console.log(`[process] (info) sales-action Adlead échec best-effort lead ${entry.leadId}: ${e.message.slice(0, 120)}`);
     }
 
     return finalize({
@@ -588,7 +623,7 @@ async function processPendingLead(entry) {
       programId: entry.programId,
       programName,
       accrocheUsed: !!accroche,
-      adleadUpdateError,
+      internalNotifError,
       adleadActionError,
     });
   } catch (err) {
@@ -706,18 +741,23 @@ app.post('/api/test/adlead-update', async (req, res) => {
   if (!programId || !leadId) {
     return res.status(400).json({ error: 'programId et leadId requis (query ou body)' });
   }
-  const result = { programId, leadId, putStatus: null, postSalesAction: null, errors: {} };
-  try {
-    result.putStatus = await updateLeadStatusPending(programId, leadId);
-  } catch (e) {
-    result.errors.put = e.message;
-  }
+  const result = { programId, leadId, postSalesAction: null, internalNotif: null, errors: {} };
   try {
     result.postSalesAction = await createRelanceSalesAction(programId, leadId);
   } catch (e) {
     result.errors.post = e.message;
   }
-  const ok = !result.errors.put && !result.errors.post;
+  try {
+    result.internalNotif = await sendInternalNotif({
+      programId, leadId,
+      contactName: '(test endpoint)',
+      contactEmail: '(test)',
+      programName: '(test)',
+    });
+  } catch (e) {
+    result.errors.notif = e.message;
+  }
+  const ok = !result.errors.notif; // sales-action erreur = normal (best-effort)
   res.status(ok ? 200 : 500).json(result);
 });
 
