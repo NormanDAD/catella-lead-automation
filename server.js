@@ -191,11 +191,14 @@ async function updateLeadStatusPending(programId, leadId) {
 //   Endpoint : POST /programs/{pid}/leads/{lid}/sales-actions
 //   NB: endpoint /records (colonne Événements) PAS exposé via X-API-Key → on utilise /sales-actions.
 async function createRelanceSalesAction(programId, leadId) {
+  // Adlead exige scheduled_at DANS LE FUTUR. On met +5 min pour absorber toute dérive
+  // d'horloge entre Railway et Adlead. L'action apparaîtra immédiatement "à traiter".
   const now = new Date();
+  const future = new Date(now.getTime() + 5 * 60 * 1000);
   const pad = (n) => String(n).padStart(2, '0');
   const scheduled_at =
-    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    `${future.getFullYear()}-${pad(future.getMonth() + 1)}-${pad(future.getDate())} ` +
+    `${pad(future.getHours())}:${pad(future.getMinutes())}:${pad(future.getSeconds())}`;
   const today = now.toLocaleDateString('fr-FR');
   return adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
     owner_assignment: 'interest-owner',
