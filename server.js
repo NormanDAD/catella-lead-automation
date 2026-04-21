@@ -191,14 +191,19 @@ async function updateLeadStatusPending(programId, leadId) {
 //   Endpoint : POST /programs/{pid}/leads/{lid}/sales-actions
 //   NB: endpoint /records (colonne Événements) PAS exposé via X-API-Key → on utilise /sales-actions.
 async function createRelanceSalesAction(programId, leadId) {
-  const today = new Date().toLocaleDateString('fr-FR');
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const scheduled_at =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const today = now.toLocaleDateString('fr-FR');
   return adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
     owner_assignment: 'interest-owner',
     user_id: null,
     type: 'other',
     priority: 'medium',
     due_at: null,
-    scheduled_at: null,
+    scheduled_at,
     comment: `Traité — Relance automatique J+1 envoyée le ${today}`,
     status: 'pending',
   });
