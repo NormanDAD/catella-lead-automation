@@ -14,7 +14,7 @@ const CONFIG = {
   POWER_AUTOMATE_URL:    process.env.POWER_AUTOMATE_URL || '',
   POWER_AUTOMATE_SECRET: process.env.POWER_AUTOMATE_SECRET || '',
   SENDER_EMAIL:          process.env.SENDER_EMAIL || 'norman.dadon@catella.com',
-  BOOKING_URL:           process.env.BOOKING_URL || 'https://bookings.cloud.microsoft/book/Rendezvousdeprsentationprogramme@catella.fr/?ismsaljsauthenabled=true',
+  BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
   SCHEDULER_INTERVAL_MS: Number(process.env.SCHEDULER_INTERVAL_MS || 5 * 60 * 1000),
   PORT:                  process.env.PORT || 3000,
@@ -137,6 +137,71 @@ async function adleadGet(path, { allow404 = false } = {}) {
   return json.data || json;
 }
 
+async function adleadPut(path, body) {
+  const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}${path}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'X-API-Key': CONFIG.ADLEAD_API_KEY,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Adlead API PUT ${res.status} ${res.statusText} on ${path}: ${text.slice(0, 200)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return json.data || json;
+}
+
+async function adleadPost(path, body) {
+  const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}${path}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'X-API-Key': CONFIG.ADLEAD_API_KEY,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Adlead API POST ${res.status} ${res.statusText} on ${path}: ${text.slice(0, 200)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return json.data || json;
+}
+
+// Update lead interest status (passage à "En attente de contact" = pending)
+async function updateLeadStatusPending(programId, leadId) {
+  return adleadPut(`/programs/${programId}/leads/${leadId}`, {
+    interest: {
+      status: 'pending',
+      follow_reason: null,
+      discard_reason: null,
+      deleted_at: null,
+    },
+  });
+}
+
+// Create a sales action on the lead (traçage "Relance J+1 envoyée")
+async function createRelanceSalesAction(programId, leadId) {
+  const today = new Date().toLocaleDateString('fr-FR');
+  return adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
+    owner_assignment: 'interest-owner',
+    user_id: null,
+    type: 'other',
+    priority: 'medium',
+    due_at: null,
+    scheduled_at: null,
+    comment: `Traité — Relance automatique J+1 envoyée le ${today}`,
+    status: 'pending',
+  });
+}
+
 async function fetchLead(leadId) {
   // Try with includes for interests so we can read status from there
   try {
@@ -211,25 +276,36 @@ function buildSalutation(contact) {
 // ─── TEMPLATE EMAIL CATELLA ─────────────────────────────────────────────────
 
 function buildEmailSubject(ctx) {
-  return `Proposition de rendez-vous – ${ctx.programme}`;
+  return `Votre projet à ${ctx.ville} — quelques précisions sur « ${ctx.programme} »`;
 }
 
 function buildEmailBody(ctx) {
-  const accrocheHtml = ctx.accroche_programme
-    ? `<p>${escapeHtml(ctx.accroche_programme)}</p>\n`
+  // Accroche programme intégrée dans la phrase d'ouverture (quand elle existe)
+  const accrochePhrase = ctx.accroche_programme
+    ? ` <em>${escapeHtml(ctx.accroche_programme)}</em> — il pourrait bien répondre à toutes vos attentes !`
     : '';
+
   return `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #222;">
 <p>Bonjour ${escapeHtml(ctx.salutation)},</p>
 
-<p>Vous avez récemment manifesté un intérêt pour le programme <strong>&laquo;&nbsp;${escapeHtml(ctx.programme)}&nbsp;&raquo;</strong> à ${escapeHtml(ctx.ville)}, développé par ${escapeHtml(ctx.promoteur)}, et je vous en remercie.</p>
+<p>Merci pour l'intérêt que vous portez à notre programme <strong>&laquo;&nbsp;${escapeHtml(ctx.programme)}&nbsp;&raquo;</strong> à ${escapeHtml(ctx.ville)}, proposé par ${escapeHtml(ctx.promoteur)}.${accrochePhrase}</p>
 
-${accrocheHtml}
-<p>Je serais ravi d'échanger avec vous pour vous présenter en détail ce programme, répondre à vos questions, et affiner avec vous un projet d'acquisition qui corresponde pleinement à vos attentes.</p>
+<p>Pour vous proposer les appartements les plus adaptés, j'aurais besoin de quelques précisions sur votre recherche :</p>
 
-<p>Vous pouvez directement réserver un créneau qui vous convient via ce lien : <a href="${ctx.lien_rdv}">${ctx.lien_rdv}</a><br>
-Ou répondre directement à ce mail.</p>
+<ul style="margin: 8px 0 16px 0; padding-left: 22px;">
+  <li>S'agit-il d'une résidence principale ou d'un investissement ?</li>
+  <li>Quelle typologie recherchez-vous (T1, T2, T3…) ?</li>
+  <li>Avez-vous une préférence d'étage ?</li>
+  <li>Une exposition idéale ?</li>
+  <li>Quel est votre budget estimé ?</li>
+</ul>
 
-<p>Au plaisir d'échanger sur votre projet,</p>
+<p>Dès réception de vos critères, je pourrai vous envoyer une sélection personnalisée de plans et de prix, idéale pour vous projeter dans votre futur cadre de vie.</p>
+
+<p>👉 Vous pouvez également prendre rendez-vous en ligne avec moi à tout moment : <a href="${ctx.lien_rdv}">Réserver un créneau</a>.<br>
+Ou en réponse directement à ce mail.</p>
+
+<p>Au plaisir d'échanger sur votre projet !</p>
 
 <p>Bien à vous,</p>
 
@@ -477,6 +553,26 @@ async function processPendingLead(entry) {
     await sendEmailViaPowerAutomate(email, subject, htmlBody);
     console.log(`[process] ✅ email envoyé à ${email} — "${subject}" (accroche: ${accroche ? 'oui' : 'non'})`);
 
+    // ── MAJ Adlead post-envoi : statut "En attente de contact" + action "Relance J+1 envoyée"
+    //    Chaque appel est isolé dans son try/catch : une erreur Adlead ne doit PAS
+    //    invalider le succès de l'envoi email.
+    let adleadUpdateError = null;
+    let adleadActionError = null;
+    try {
+      await updateLeadStatusPending(entry.programId, entry.leadId);
+      console.log(`[process] ✅ statut Adlead lead ${entry.leadId} → "pending" (En attente de contact)`);
+    } catch (e) {
+      adleadUpdateError = e.message;
+      console.error(`[process] ⚠️ échec MAJ statut Adlead lead ${entry.leadId}: ${e.message}`);
+    }
+    try {
+      await createRelanceSalesAction(entry.programId, entry.leadId);
+      console.log(`[process] ✅ sales-action Adlead créée sur lead ${entry.leadId} (Relance J+1)`);
+    } catch (e) {
+      adleadActionError = e.message;
+      console.error(`[process] ⚠️ échec création sales-action Adlead lead ${entry.leadId}: ${e.message}`);
+    }
+
     return finalize({
       id: entry.interestId,
       status: 'sent',
@@ -487,6 +583,8 @@ async function processPendingLead(entry) {
       programId: entry.programId,
       programName,
       accrocheUsed: !!accroche,
+      adleadUpdateError,
+      adleadActionError,
     });
   } catch (err) {
     console.error(`[process] erreur interest ${entry.interestId}:`, err.message);
