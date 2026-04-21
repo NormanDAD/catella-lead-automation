@@ -502,9 +502,12 @@ async function processPendingLead(entry) {
     // Détection "commercial a pris la main"
     //   - Soit le status de l'interest n'est plus "to-process" (si on a pu le relire)
     //   - Soit le lead a eu une interaction postérieure à receivedAt (fallback quand rawPayload est figé)
+    //   entry.force === true bypass ce check (utilisé par /api/test/process-now).
     let commercialActed = false;
     let reason = '';
-    if (interestSource !== 'rawPayload (webhook T0)' && interest.status && interest.status !== 'to-process') {
+    if (entry.force) {
+      console.log(`[process] entry.force=true → on bypass le check commercialActed`);
+    } else if (interestSource !== 'rawPayload (webhook T0)' && interest.status && interest.status !== 'to-process') {
       commercialActed = true;
       reason = `Statut interest = "${interest.status}"`;
     } else if (lead.last_interaction_at && entry.receivedAt) {
@@ -759,6 +762,59 @@ app.post('/api/test/adlead-update', async (req, res) => {
   }
   const ok = !result.errors.notif; // sales-action erreur = normal (best-effort)
   res.status(ok ? 200 : 500).json(result);
+});
+
+// Endpoint de test : force le traitement immédiat d'un lead (bypass fenêtre 24h + queue + check commercial).
+// Usage : POST /api/test/process-now?leadId=X[&interestId=Y][&programId=Z][&force=1]
+// - Si interestId manquant, on fetch le lead et on prend le premier interest.
+// - force=1 bypass aussi le check "commercial a déjà agi" (sinon un lead déjà traité sera 'cancelled').
+// Utilisé pour valider le mail client en prod sans attendre la fenêtre de 24h.
+app.post('/api/test/process-now', async (req, res) => {
+  const leadId = req.query.leadId || req.body?.leadId;
+  let interestId = req.query.interestId || req.body?.interestId;
+  let programId = req.query.programId || req.body?.programId;
+  const force = String(req.query.force || req.body?.force || '').toLowerCase() === '1'
+             || String(req.query.force || req.body?.force || '').toLowerCase() === 'true';
+  if (!leadId) {
+    return res.status(400).json({ error: 'leadId requis (query ou body)' });
+  }
+  // Si interestId manquant, on le déduit depuis le lead
+  if (!interestId) {
+    try {
+      const lead = await fetchLead(String(leadId));
+      const interests = lead?.interests || lead?.interest || lead?.program_interests || lead?.programs || [];
+      if (!Array.isArray(interests) || interests.length === 0) {
+        return res.status(400).json({
+          error: 'interestId manquant et aucun interest trouvé sur le lead',
+          leadKeys: Object.keys(lead || {}),
+        });
+      }
+      interestId = interests[0].id;
+      if (!programId) programId = interests[0].program_id || interests[0].program?.id;
+      console.log(`[process-now] interestId déduit=${interestId}, programId=${programId} (depuis lead ${leadId})`);
+    } catch (e) {
+      return res.status(500).json({ error: `Impossible de fetch lead ${leadId}: ${e.message}` });
+    }
+  }
+  const entry = {
+    interestId: String(interestId),
+    leadId: String(leadId),
+    programId: programId ? String(programId) : null,
+    receivedAt: new Date().toISOString(),
+    checkAt: new Date().toISOString(),
+    rawPayload: null,
+    attempts: 0,
+    maxAttempts: 1,
+    force,
+  };
+  const before = processedLeads.length;
+  try {
+    await processPendingLead(entry);
+    const result = processedLeads.slice(before);
+    return res.json({ entry, result });
+  } catch (e) {
+    return res.status(500).json({ error: e.message, stack: e.stack });
+  }
 });
 
 // Probe multiple candidate endpoints pour trouver ceux qui fonctionnent avec la clé API.
