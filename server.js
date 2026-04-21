@@ -718,6 +718,41 @@ app.post('/api/test/adlead-update', async (req, res) => {
   res.status(ok ? 200 : 500).json(result);
 });
 
+// Probe multiple candidate endpoints pour trouver ceux qui fonctionnent avec la clé API.
+// Usage : GET /api/test/adlead-probe?programId=X&leadId=Y
+app.get('/api/test/adlead-probe', async (req, res) => {
+  const programId = req.query.programId || '686';
+  const leadId = req.query.leadId || '77143';
+  const base = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}`;
+  const headers = {
+    'X-API-Key': CONFIG.ADLEAD_API_KEY,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+  };
+
+  const probes = [
+    // GET probes (read-only, safe)
+    { tag: 'GET lead',                method: 'GET', path: `/programs/${programId}/leads/${leadId}` },
+    { tag: 'GET lead records',        method: 'GET', path: `/programs/${programId}/leads/${leadId}/records` },
+    { tag: 'GET lead events',         method: 'GET', path: `/programs/${programId}/leads/${leadId}/events` },
+    { tag: 'GET lead activities',     method: 'GET', path: `/programs/${programId}/leads/${leadId}/activities` },
+    { tag: 'GET lead sales-actions',  method: 'GET', path: `/programs/${programId}/leads/${leadId}/sales-actions` },
+    { tag: 'GET lead interests',      method: 'GET', path: `/programs/${programId}/leads/${leadId}/interests` },
+  ];
+
+  const results = [];
+  for (const p of probes) {
+    try {
+      const r = await fetch(`${base}${p.path}`, { method: p.method, headers });
+      const t = await r.text();
+      results.push({ ...p, status: r.status, body: t.slice(0, 200) });
+    } catch (e) {
+      results.push({ ...p, error: e.message });
+    }
+  }
+  res.json({ base, programId, leadId, results });
+});
+
 app.post('/webhook/adlead', (req, res) => {
   if (!verifyAdleadSignature(req)) {
     console.warn('[webhook] Signature invalide');
