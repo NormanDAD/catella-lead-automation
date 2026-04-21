@@ -54,12 +54,32 @@ function findProgramme(name) {
 }
 
 // ─── PERSISTENCE ────────────────────────────────────────────────────────────
-const DATA_DIR = path.join(__dirname, 'data');
+// DATA_DIR : configurable via env DATA_DIR (Railway Volume monté sur /data p.ex.).
+// Fallback : ./data à côté du server.js (utile en dev local).
+// ATTENTION : sur Railway sans Volume attaché, /app/data est ÉPHÉMÈRE — la file
+// sera wipée à chaque redéploiement. Attacher un Volume dans Railway et pointer
+// DATA_DIR vers son mount path (ex: /data) pour une vraie persistance.
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, 'data');
 const PENDING_FILE = path.join(DATA_DIR, 'pending_leads.json');
 const PROCESSED_FILE = path.join(DATA_DIR, 'processed_leads.json');
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Vérifie au démarrage que DATA_DIR est accessible en écriture
+function checkDataDirWritable() {
+  try {
+    ensureDataDir();
+    const probe = path.join(DATA_DIR, '.write-probe');
+    fs.writeFileSync(probe, String(Date.now()), 'utf8');
+    fs.unlinkSync(probe);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 function loadJsonFile(file, fallback) {
@@ -81,8 +101,29 @@ function saveJsonFile(file, data) {
   }
 }
 
+// Check filesystem writability AVANT de charger — si ça échoue on saura pourquoi
+const _dirCheck = checkDataDirWritable();
+if (_dirCheck.ok) {
+  console.log(`[persistence] DATA_DIR=${DATA_DIR} OK (writable)`);
+} else {
+  console.error(`[persistence] ⚠️  DATA_DIR=${DATA_DIR} NON ACCESSIBLE EN ÉCRITURE: ${_dirCheck.error}`);
+  console.error(`[persistence] ⚠️  La file ne sera PAS persistée — corriger avant la prod.`);
+}
+
 let pendingLeads = loadJsonFile(PENDING_FILE, []);
 let processedLeads = loadJsonFile(PROCESSED_FILE, []);
+
+console.log(`[persistence] Chargé au démarrage: ${pendingLeads.length} lead(s) en attente, ${processedLeads.length} lead(s) traité(s)`);
+if (pendingLeads.length > 0) {
+  const nextDue = pendingLeads
+    .map(l => new Date(l.checkAt).getTime())
+    .filter(t => !isNaN(t))
+    .sort((a, b) => a - b)[0];
+  if (nextDue) {
+    const delta = Math.round((nextDue - Date.now()) / 60000);
+    console.log(`[persistence] Prochain check dans ~${delta} minute(s) (${new Date(nextDue).toISOString()})`);
+  }
+}
 
 function savePending() { saveJsonFile(PENDING_FILE, pendingLeads); }
 function saveProcessed() { saveJsonFile(PROCESSED_FILE, processedLeads); }
@@ -646,12 +687,34 @@ async function processPendingLead(entry) {
 // ─── ROUTES ─────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => {
+  const dirCheck = checkDataDirWritable();
+  let pendingFileStat = null, processedFileStat = null;
+  try { pendingFileStat = fs.statSync(PENDING_FILE); } catch {}
+  try { processedFileStat = fs.statSync(PROCESSED_FILE); } catch {}
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     pending: pendingLeads.length,
     processed: processedLeads.length,
     programmes: Object.keys(PROGRAMMES).length,
+    persistence: {
+      dataDir: DATA_DIR,
+      dataDirFromEnv: !!process.env.DATA_DIR,
+      writable: dirCheck.ok,
+      writeError: dirCheck.ok ? null : dirCheck.error,
+      pendingFile: {
+        path: PENDING_FILE,
+        exists: !!pendingFileStat,
+        sizeBytes: pendingFileStat?.size || 0,
+        mtime: pendingFileStat?.mtime || null,
+      },
+      processedFile: {
+        path: PROCESSED_FILE,
+        exists: !!processedFileStat,
+        sizeBytes: processedFileStat?.size || 0,
+        mtime: processedFileStat?.mtime || null,
+      },
+    },
   });
 });
 
