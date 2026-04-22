@@ -47,7 +47,22 @@ const CONFIG = {
   ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
   REPLY_HANDLER_ENABLED:   process.env.REPLY_HANDLER_ENABLED === 'true',
   REPLY_POLL_INTERVAL_MS:  Number(process.env.REPLY_POLL_INTERVAL_MS || 3 * 60 * 1000),
+  // ── Dénonciation fail-closed ──────────────────────────────────────────────
+  // L'endpoint Adlead GET /programs/{id}/registrations peut répondre 403 si la
+  // clé API n'a pas le scope registrations:read. Dans ce cas on ne peut PAS
+  // savoir si un lead est dénoncé → par défaut on BLOQUE (fail-closed) pour ne
+  // pas envoyer d'email sur un lead revendiqué par un prescripteur.
+  // Mettre SKIP_REGISTRATIONS_CHECK=true pour bypasser ce fail-closed en
+  // urgence (à utiliser en connaissance de cause).
+  SKIP_REGISTRATIONS_CHECK: process.env.SKIP_REGISTRATIONS_CHECK === 'true',
   PORT:                  process.env.PORT || 3000,
+};
+
+// ─── RUNTIME STATS (compteurs process — non persistés) ─────────────────────
+// Utilisés par /api/stats pour le dashboard. Remis à 0 au boot ; pas besoin de
+// persister, ce sont des indicateurs de santé "depuis le dernier redémarrage".
+const RUNTIME_STATS = {
+  registrationsFailClosed: 0, // leads bloqués parce que /registrations inaccessible
 };
 
 // Set pour lookup O(1) dans enqueueLead
@@ -350,31 +365,50 @@ async function fetchProgram(programId) {
 // Liste les dénonciations (registrations) d'un programme.
 // Pagination : on récupère jusqu'à 3 pages x 100 pour couvrir l'historique récent
 // (une dénonciation expire en ~1 mois donc seules les récentes sont "actives").
+//
+// Retourne { ok, regs, status, error } au lieu d'un simple array, pour que
+// l'appelant puisse distinguer "0 dénonciation" d'un "endpoint inaccessible".
+// - ok=true  : appel API réussi, regs contient les lignes (éventuellement [])
+// - ok=false : 4xx/5xx/body invalide/network error → on NE PEUT PAS conclure
+//              que le lead n'est pas dénoncé (fail-closed côté appelant).
 async function fetchProgramRegistrations(programId, { maxPages = 3 } = {}) {
-  if (!programId) return [];
+  if (!programId) return { ok: true, regs: [], status: null, error: null };
   const all = [];
+  let firstStatus = null;
   for (let page = 1; page <= maxPages; page++) {
     try {
       const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}/programs/${programId}/registrations?page=${page}&per_page=100`;
       const res = await fetch(url, {
         headers: { 'X-API-Key': CONFIG.ADLEAD_API_KEY, 'Accept': 'application/json' },
       });
+      if (firstStatus === null) firstStatus = res.status;
       if (!res.ok) {
         const t = await res.text().catch(() => '');
         console.log(`[registrations] GET page ${page} programme ${programId} → ${res.status} ${t.slice(0, 150)}`);
-        break;
+        // Si c'est la 1re page qui échoue, on remonte un fail-closed. Si une
+        // page ultérieure échoue on a déjà au moins les premières dénonciations
+        // en mémoire — on préfère encore renvoyer ok:false par prudence car
+        // on ne peut pas affirmer avoir la totalité.
+        return { ok: false, regs: all, status: res.status, error: `HTTP ${res.status}: ${t.slice(0, 150)}` };
       }
       const json = await res.json();
+      // Adlead peut renvoyer {success:false, message:"..."} avec un HTTP 200
+      // dans certains cas anciens — on traite ça comme un échec.
+      if (json && json.success === false) {
+        const msg = json.message || 'success:false';
+        console.log(`[registrations] GET page ${page} programme ${programId} → body success=false: ${String(msg).slice(0, 150)}`);
+        return { ok: false, regs: all, status: res.status, error: `body success:false — ${String(msg).slice(0, 150)}` };
+      }
       const data = Array.isArray(json.data) ? json.data : [];
       all.push(...data);
       const lastPage = json?.meta?.last_page || 1;
       if (page >= lastPage) break;
     } catch (e) {
       console.log(`[registrations] erreur page ${page} programme ${programId}: ${e.message}`);
-      break;
+      return { ok: false, regs: all, status: firstStatus, error: e.message };
     }
   }
-  return all;
+  return { ok: true, regs: all, status: firstStatus, error: null };
 }
 
 // Extrait l'id du lead depuis une registration Adlead en couvrant toutes les
@@ -405,10 +439,35 @@ function extractLeadIdFromRegistration(r) {
 //   - status pending  (en cours d'arbitrage → on attend, donc on skip)
 //   - status approved ET expires_at > maintenant
 // (rejected/expired ne bloquent pas)
-// Retourne la registration bloquante (ou null).
+//
+// Retourne :
+//   - null                          → pas de dénonciation bloquante (safe, on envoie)
+//   - { ... registration Adlead }   → dénonciation trouvée (on skip)
+//   - { _failClosed: true, status,
+//       error }                     → endpoint inaccessible, on skip par prudence
+//                                     (sauf si CONFIG.SKIP_REGISTRATIONS_CHECK=true)
 async function findActiveRegistrationForLead(programId, leadId) {
   if (!programId || !leadId) return null;
-  const regs = await fetchProgramRegistrations(programId);
+  const result = await fetchProgramRegistrations(programId);
+
+  // ── Fail-closed : si on n'a pas pu lister les registrations (403, network,
+  // body success:false, etc.), on NE PEUT PAS affirmer que le lead n'est pas
+  // dénoncé. Par défaut on bloque. Bypass possible via SKIP_REGISTRATIONS_CHECK.
+  if (!result.ok) {
+    if (CONFIG.SKIP_REGISTRATIONS_CHECK) {
+      console.warn(`[registrations] ⚠️  endpoint inaccessible (statut=${result.status}, error=${result.error}) MAIS SKIP_REGISTRATIONS_CHECK=true → on laisse passer le lead ${leadId} (programme ${programId})`);
+      return null;
+    }
+    RUNTIME_STATS.registrationsFailClosed += 1;
+    console.log(`[registrations] BLOQUÉ (endpoint inaccessible): lead ${leadId} programme ${programId}, statut=${result.status}, error=${result.error}`);
+    return {
+      _failClosed: true,
+      status: result.status,
+      error: result.error,
+    };
+  }
+
+  const regs = result.regs;
   const now = Date.now();
   const leadIdNum = Number(leadId);
 
@@ -812,6 +871,22 @@ async function processPendingLead(entry) {
     // pour une vente directe : on ne relance PAS (ni email ni WhatsApp).
     try {
       const activeReg = await findActiveRegistrationForLead(entry.programId, entry.leadId);
+      if (activeReg && activeReg._failClosed) {
+        // Endpoint /registrations inaccessible → fail-closed : on skip le lead
+        // pour ne pas risquer d'envoyer sur une dénonciation qu'on aurait
+        // manquée. Bypass via SKIP_REGISTRATIONS_CHECK=true (voir CONFIG).
+        console.log(`[process] lead ${entry.leadId} SKIP fail-closed (registrations inaccessible, statut=${activeReg.status})`);
+        return finalize({
+          id: entry.interestId,
+          status: 'skipped',
+          reason: `Check dénonciation fail-closed (endpoint /registrations statut=${activeReg.status}: ${activeReg.error || 'inaccessible'}). Bypass: SKIP_REGISTRATIONS_CHECK=true.`,
+          contactName: contact.fullname || '',
+          email,
+          programId: entry.programId,
+          registrationsFailClosed: true,
+          registrationsFailClosedStatus: activeReg.status,
+        });
+      }
       if (activeReg) {
         const expires = activeReg.expires_at || 'n/a';
         const ownerName = activeReg.owner?.fullname || activeReg.owner?.shortname || 'inconnu';
@@ -830,10 +905,24 @@ async function processPendingLead(entry) {
         });
       }
     } catch (e) {
-      // Best-effort : si l'API registrations échoue, on log et on CONTINUE
-      // (mieux vaut potentiellement envoyer un email que bloquer toute la chaîne).
-      // Si ça devient critique on pourra passer en fail-closed via un env var.
-      console.error(`[process] ⚠️ check dénonciation échec lead ${entry.leadId}: ${e.message} — on continue quand même`);
+      // Exception imprévue dans la chaîne de check → fail-closed aussi.
+      // On préfère bloquer que laisser passer : un lead dénoncé envoyé = client
+      // perdu + risque métier. Bypass : SKIP_REGISTRATIONS_CHECK=true.
+      console.error(`[process] ⚠️ check dénonciation EXCEPTION lead ${entry.leadId}: ${e.message}`);
+      if (!CONFIG.SKIP_REGISTRATIONS_CHECK) {
+        RUNTIME_STATS.registrationsFailClosed += 1;
+        console.log(`[registrations] BLOQUÉ (exception): lead ${entry.leadId} programme ${entry.programId}, error=${e.message}`);
+        return finalize({
+          id: entry.interestId,
+          status: 'skipped',
+          reason: `Check dénonciation fail-closed (exception: ${e.message}). Bypass: SKIP_REGISTRATIONS_CHECK=true.`,
+          contactName: contact.fullname || '',
+          email,
+          programId: entry.programId,
+          registrationsFailClosed: true,
+        });
+      }
+      console.warn(`[process] SKIP_REGISTRATIONS_CHECK=true → on continue malgré l'exception sur lead ${entry.leadId}`);
     }
 
     // Résoudre le nom du programme : d'abord depuis l'interest, sinon via fetchProgram
@@ -1135,6 +1224,11 @@ app.get('/api/stats', (req, res) => {
     byDay,
     byProgram,
     recent,
+    // Santé du filtre dénonciation — si > 0, l'endpoint /registrations est
+    // inaccessible (probablement clé API sans scope registrations:read) et
+    // des leads ont été bloqués par le fail-closed. Cf. CONFIG.SKIP_REGISTRATIONS_CHECK.
+    registrationsFailClosed: RUNTIME_STATS.registrationsFailClosed,
+    skipRegistrationsCheck: CONFIG.SKIP_REGISTRATIONS_CHECK,
   });
 });
 
