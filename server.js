@@ -865,6 +865,18 @@ async function processPendingLead(entry) {
       });
     }
 
+    // ── Scan OBSERVATIONNEL du payload lead ──────────────────────────────────
+    // Non bloquant : on log juste la présence éventuelle d'un champ de
+    // dénonciation directement sur l'objet lead. Si un jour on voit apparaître
+    // "[denounced-scan] … signaux potentiels trouvés → denounced=true" dans les
+    // logs Railway, on saura quel champ exploiter et on pourra promouvoir ce
+    // scan en check bloquant dans un commit ultérieur.
+    try {
+      scanLeadForDenouncedSignals(lead, { verbose: true });
+    } catch (e) {
+      console.log(`[denounced-scan] erreur (non bloquant): ${e.message}`);
+    }
+
     // ── Check DÉNONCIATION (règle métier critique) ───────────────────────────
     // Si une dénonciation active (pending ou approved non-expirée) existe sur ce
     // lead pour ce programme, c'est que l'ERP/un prescripteur a revendiqué le lead
@@ -1370,6 +1382,110 @@ app.get('/api/test/adlead-probe', async (req, res) => {
   }
   res.json({ base, programId, leadId, results });
 });
+
+// Dump brut du payload d'un lead — pour investigation : chercher si Adlead
+// expose un champ de dénonciation directement sur l'objet lead (denounced,
+// registration, active_registration, locked, reported, etc.) qui permettrait
+// de sortir du cul-de-sac /registrations 403.
+// Usage : GET /api/test/lead-dump?programId=611&leadId=1633940
+// Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
+// le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
+app.get('/api/test/lead-dump', async (req, res) => {
+  const programId = req.query.programId;
+  const leadId = req.query.leadId;
+  if (!leadId) return res.status(400).json({ error: 'leadId requis' });
+  const base = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}`;
+  const headers = {
+    'X-API-Key': CONFIG.ADLEAD_API_KEY,
+    'Accept': 'application/json',
+  };
+  const urls = [];
+  if (programId) urls.push(`${base}/programs/${programId}/leads/${leadId}?include=interests,interests.program,contacts,registrations,activeRegistration,registration`);
+  urls.push(`${base}/leads/${leadId}?include=interests,interests.program,contacts,registrations,activeRegistration,registration`);
+  urls.push(`${base}/leads/${leadId}`);
+
+  const attempts = [];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers });
+      const t = await r.text();
+      let json = null;
+      try { json = JSON.parse(t); } catch { /* noop */ }
+      const leadObj = json?.data || json || null;
+      const topKeys = leadObj && typeof leadObj === 'object' ? Object.keys(leadObj) : [];
+      const nestedKeys = {};
+      if (leadObj && typeof leadObj === 'object') {
+        for (const k of topKeys) {
+          const v = leadObj[k];
+          if (v && typeof v === 'object' && !Array.isArray(v)) {
+            nestedKeys[k] = Object.keys(v);
+          } else if (Array.isArray(v) && v[0] && typeof v[0] === 'object') {
+            nestedKeys[k] = `[] of {${Object.keys(v[0]).join(',')}} (len=${v.length})`;
+          }
+        }
+      }
+      const scan = scanLeadForDenouncedSignals(leadObj, { verbose: true });
+      attempts.push({
+        url,
+        status: r.status,
+        ok: r.ok,
+        topKeys,
+        nestedKeys,
+        denouncedScan: scan,
+        rawSample: t.slice(0, 8000),
+      });
+      if (r.ok && json) break; // premier succès, on arrête
+    } catch (e) {
+      attempts.push({ url, error: e.message });
+    }
+  }
+  res.json({ programId, leadId, attempts });
+});
+
+// Scan OBSERVATIONNEL (non bloquant) du payload lead pour détecter un éventuel
+// champ de dénonciation directement exposé par Adlead. Retourne la liste des
+// champs "suspects" trouvés avec leur valeur. On reste conservateur : on ne
+// liste QUE les clés qui ressemblent vraiment à un signal dénonciation, pas
+// des champs ambigus (ex: owner/assigned_to qui peuvent légitimement être
+// remplis pour un commercial normal).
+//
+// Utilisation :
+//   - Appelé dans /api/test/lead-dump pour investigation manuelle.
+//   - Appelé dans le pipeline de relance (non-bloquant) pour LOGUER la
+//     présence éventuelle d'un signal — Norman verra apparaître la clé dans
+//     les logs Railway et on pourra ensuite commit un vrai check bloquant.
+function scanLeadForDenouncedSignals(lead, { verbose = false } = {}) {
+  if (!lead || typeof lead !== 'object') return { found: [], checkedKeys: [] };
+  // Clés qui, par leur nom même, pointent clairement vers une dénonciation /
+  // registration / verrou commercial. Si Adlead en expose une, c'est gagné.
+  const suspectKeys = [
+    'denounced', 'is_denounced', 'denounced_at', 'denounced_by',
+    'reported', 'is_reported', 'reported_at',
+    'registration', 'registrations', 'active_registration', 'activeRegistration',
+    'registered', 'is_registered', 'registered_at', 'registered_by',
+    'flagged', 'is_flagged',
+    'locked', 'is_locked', 'locked_by',
+    'reservation', 'reservations', 'active_reservation',
+  ];
+  const found = [];
+  for (const key of suspectKeys) {
+    if (Object.prototype.hasOwnProperty.call(lead, key)) {
+      const v = lead[key];
+      // On capture une représentation courte pour le log
+      let sample;
+      if (v === null || v === undefined) sample = String(v);
+      else if (typeof v === 'object') sample = JSON.stringify(v).slice(0, 200);
+      else sample = String(v).slice(0, 200);
+      found.push({ key, type: typeof v, isArray: Array.isArray(v), sample });
+    }
+  }
+  if (verbose && found.length > 0) {
+    console.log(`[denounced-scan] lead ${lead.id || '?'} : signaux potentiels trouvés → ${found.map(f => `${f.key}=${f.sample}`).join(' | ')}`);
+  } else if (verbose) {
+    console.log(`[denounced-scan] lead ${lead.id || '?'} : aucun des ${suspectKeys.length} champs suspects présent (top keys: ${Object.keys(lead).join(',')})`);
+  }
+  return { found, checkedKeys: suspectKeys };
+}
 
 // Dump brut des registrations d'un programme — utilisé pour vérifier le schéma
 // exact (noms de champs) quand le filtre "skip dénoncé" rate un lead.
