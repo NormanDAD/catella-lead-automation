@@ -27,6 +27,16 @@ const CONFIG = {
                            .split(',')
                            .map(s => s.trim())
                            .filter(Boolean),
+  // ── WhatsApp via Twilio ──────────────────────────────────────────────────
+  // Phase 1 (sandbox) : TWILIO_WHATSAPP_FROM = "whatsapp:+14155238886"
+  //   → destinataires doivent avoir joint le sandbox (ex: "join fence-cutting")
+  // Phase 2 (prod)    : TWILIO_WHATSAPP_FROM = "whatsapp:+33XXXXXXXXX" (numéro dédié Meta)
+  //   → nécessite templates approuvés côté Meta
+  // WHATSAPP_ENABLED = 'true' pour activer ; sinon kill switch (aucun envoi tenté).
+  TWILIO_ACCOUNT_SID:    process.env.TWILIO_ACCOUNT_SID || '',
+  TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
+  TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
+  WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
   PORT:                  process.env.PORT || 3000,
 };
 
@@ -311,6 +321,58 @@ async function fetchProgram(programId) {
   }
 }
 
+// Liste les dénonciations (registrations) d'un programme.
+// Pagination : on récupère jusqu'à 3 pages x 100 pour couvrir l'historique récent
+// (une dénonciation expire en ~1 mois donc seules les récentes sont "actives").
+async function fetchProgramRegistrations(programId, { maxPages = 3 } = {}) {
+  if (!programId) return [];
+  const all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    try {
+      const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}/programs/${programId}/registrations?page=${page}&per_page=100`;
+      const res = await fetch(url, {
+        headers: { 'X-API-Key': CONFIG.ADLEAD_API_KEY, 'Accept': 'application/json' },
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        console.log(`[registrations] GET page ${page} programme ${programId} → ${res.status} ${t.slice(0, 150)}`);
+        break;
+      }
+      const json = await res.json();
+      const data = Array.isArray(json.data) ? json.data : [];
+      all.push(...data);
+      const lastPage = json?.meta?.last_page || 1;
+      if (page >= lastPage) break;
+    } catch (e) {
+      console.log(`[registrations] erreur page ${page} programme ${programId}: ${e.message}`);
+      break;
+    }
+  }
+  return all;
+}
+
+// Vrai si le lead a une dénonciation "bloquante" active sur le programme :
+//   - status pending  (en cours d'arbitrage → on attend, donc on skip)
+//   - status approved ET expires_at > maintenant
+// (rejected/expired ne bloquent pas)
+// Retourne la registration bloquante (ou null).
+async function findActiveRegistrationForLead(programId, leadId) {
+  if (!programId || !leadId) return null;
+  const regs = await fetchProgramRegistrations(programId);
+  const now = Date.now();
+  const leadIdNum = Number(leadId);
+  const match = regs.find(r => {
+    if (Number(r.lead_id) !== leadIdNum) return false;
+    if (r.status === 'pending') return true;
+    if (r.status === 'approved') {
+      if (!r.expires_at) return true; // approuvée sans date → considère active
+      return new Date(r.expires_at).getTime() > now;
+    }
+    return false;
+  });
+  return match || null;
+}
+
 async function fetchInterest(interestId, { programId, leadId } = {}) {
   // Try several plausible endpoint shapes — Adlead uses nested resources under programs.
   const candidates = [];
@@ -447,6 +509,59 @@ async function sendEmailViaPowerAutomate(to, subject, htmlBody) {
     const err = await res.text().catch(() => '');
     throw new Error(`Power Automate ${res.status}: ${err.slice(0, 200)}`);
   }
+}
+
+// ─── ENVOI WHATSAPP VIA TWILIO ──────────────────────────────────────────────
+// Sandbox : le destinataire doit avoir envoyé "join <code>" au numéro sandbox.
+// Prod    : templates Meta approuvés requis pour messages sortants hors fenêtre 24h.
+
+function normalizePhoneE164(raw, defaultCountryCode = '33') {
+  if (!raw) return null;
+  const digits = String(raw).replace(/[^\d+]/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('+')) return digits;
+  if (digits.startsWith('00')) return '+' + digits.slice(2);
+  if (digits.startsWith('0')) return '+' + defaultCountryCode + digits.slice(1);
+  return '+' + digits;
+}
+
+async function sendWhatsAppViaTwilio(toE164, body) {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN || !CONFIG.TWILIO_WHATSAPP_FROM) {
+    throw new Error('Credentials Twilio non configurés');
+  }
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const url  = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json`;
+  const params = new URLSearchParams();
+  params.append('From', CONFIG.TWILIO_WHATSAPP_FROM);
+  params.append('To',   `whatsapp:${toE164}`);
+  params.append('Body', body);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type':  'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Twilio ${res.status}: ${err.slice(0, 200)}`);
+  }
+  return await res.json();
+}
+
+function buildWhatsAppMessage(ctx) {
+  const firstname = splitName(ctx.fullname || '').firstname || '';
+  const hello = firstname ? `Bonjour ${firstname}` : 'Bonjour';
+  const villePart = ctx.ville ? ` à ${ctx.ville}` : '';
+  return `${hello}, Norman Dadon de Catella Residential.
+
+Vous vous êtes intéressé(e) à notre programme « ${ctx.programme} »${villePart}. J'aimerais comprendre votre recherche : typologie, étage, budget ?
+
+Répondez-moi ici, ou prenez 5 min à votre convenance : ${ctx.lien_rdv}
+
+Bien à vous,
+Norman`;
 }
 
 // ─── FLOW PRINCIPAL ─────────────────────────────────────────────────────────
@@ -630,6 +745,36 @@ async function processPendingLead(entry) {
       });
     }
 
+    // ── Check DÉNONCIATION (règle métier critique) ───────────────────────────
+    // Si une dénonciation active (pending ou approved non-expirée) existe sur ce
+    // lead pour ce programme, c'est que l'ERP/un prescripteur a revendiqué le lead
+    // pour une vente directe : on ne relance PAS (ni email ni WhatsApp).
+    try {
+      const activeReg = await findActiveRegistrationForLead(entry.programId, entry.leadId);
+      if (activeReg) {
+        const expires = activeReg.expires_at || 'n/a';
+        const ownerName = activeReg.owner?.fullname || activeReg.owner?.shortname || 'inconnu';
+        console.log(`[process] lead ${entry.leadId} DÉNONCÉ (registration ${activeReg.id}, status=${activeReg.status}, owner=${ownerName}, expires=${expires}) → on n'envoie pas`);
+        return finalize({
+          id: entry.interestId,
+          status: 'denounced',
+          reason: `Dénonciation ${activeReg.status} par ${ownerName} (registration ${activeReg.id}, expire ${expires})`,
+          contactName: contact.fullname || '',
+          email,
+          programId: entry.programId,
+          registrationId: activeReg.id,
+          registrationStatus: activeReg.status,
+          registrationOwner: ownerName,
+          registrationExpiresAt: activeReg.expires_at,
+        });
+      }
+    } catch (e) {
+      // Best-effort : si l'API registrations échoue, on log et on CONTINUE
+      // (mieux vaut potentiellement envoyer un email que bloquer toute la chaîne).
+      // Si ça devient critique on pourra passer en fail-closed via un env var.
+      console.error(`[process] ⚠️ check dénonciation échec lead ${entry.leadId}: ${e.message} — on continue quand même`);
+    }
+
     // Résoudre le nom du programme : d'abord depuis l'interest, sinon via fetchProgram
     let programApi = interest.program || null;
     let programName = programApi?.name || null;
@@ -690,6 +835,45 @@ async function processPendingLead(entry) {
       console.log(`[process] (info) sales-action Adlead échec best-effort lead ${entry.leadId}: ${e.message.slice(0, 120)}`);
     }
 
+    // ── Best-effort WhatsApp via Twilio (non bloquant, gated par WHATSAPP_ENABLED)
+    //    Phase 1 = sandbox : destinataire doit avoir joint le sandbox au préalable.
+    //    Phase 2 = prod    : templates Meta approuvés requis.
+    let whatsappError = null;
+    let whatsappSid   = null;
+    let whatsappTo    = null;
+    if (CONFIG.WHATSAPP_ENABLED) {
+      const phoneRaw = contact.phone_primary
+                    || contact.phone1
+                    || contact.mobile_primary
+                    || contact.mobile
+                    || contact.phone_mobile
+                    || null;
+      const phoneE164 = normalizePhoneE164(phoneRaw);
+      if (!phoneE164) {
+        whatsappError = 'pas de téléphone sur le contact';
+        console.log(`[process] (info) WhatsApp skip lead ${entry.leadId}: ${whatsappError}`);
+      } else if (contact.optout_sms === true || contact.optout_phone === true) {
+        whatsappError = 'optout téléphone/sms';
+        console.log(`[process] (info) WhatsApp skip lead ${entry.leadId}: ${whatsappError}`);
+      } else {
+        whatsappTo = phoneE164;
+        try {
+          const body = buildWhatsAppMessage({
+            fullname: contact.fullname || '',
+            programme: programName,
+            ville,
+            lien_rdv: CONFIG.BOOKING_URL,
+          });
+          const resp = await sendWhatsAppViaTwilio(phoneE164, body);
+          whatsappSid = resp && resp.sid ? resp.sid : null;
+          console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (sid: ${whatsappSid})`);
+        } catch (e) {
+          whatsappError = e.message;
+          console.error(`[process] ⚠️ WhatsApp échec ${phoneE164} lead ${entry.leadId}: ${e.message}`);
+        }
+      }
+    }
+
     return finalize({
       id: entry.interestId,
       status: 'sent',
@@ -702,6 +886,10 @@ async function processPendingLead(entry) {
       accrocheUsed: !!accroche,
       internalNotifError,
       adleadActionError,
+      whatsappEnabled: CONFIG.WHATSAPP_ENABLED,
+      whatsappTo,
+      whatsappSid,
+      whatsappError,
     });
   } catch (err) {
     console.error(`[process] erreur interest ${entry.interestId}:`, err.message);
