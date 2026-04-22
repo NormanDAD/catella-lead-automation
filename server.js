@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const inboxWatcher = require('./inboxWatcher');
 
 const app = express();
 
@@ -37,6 +38,15 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  // ── Reply handler (Graph device-code + Claude) ───────────────────────────
+  // ANTHROPIC_API_KEY        : clé API pour l'appel Claude Sonnet
+  // ANTHROPIC_MODEL          : id modèle (default claude-sonnet-4-6)
+  // REPLY_HANDLER_ENABLED    : master switch — si false, poll() ne fait rien
+  // REPLY_POLL_INTERVAL_MS   : fréquence poll inbox (default 3 min)
+  ANTHROPIC_API_KEY:       process.env.ANTHROPIC_API_KEY || '',
+  ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+  REPLY_HANDLER_ENABLED:   process.env.REPLY_HANDLER_ENABLED === 'true',
+  REPLY_POLL_INTERVAL_MS:  Number(process.env.REPLY_POLL_INTERVAL_MS || 3 * 60 * 1000),
   PORT:                  process.env.PORT || 3000,
 };
 
@@ -138,6 +148,22 @@ if (_dirCheck.ok) {
 
 let pendingLeads = loadJsonFile(PENDING_FILE, []);
 let processedLeads = loadJsonFile(PROCESSED_FILE, []);
+
+// ─── INBOX WATCHER (réponses prospect) ──────────────────────────────────────
+// Initialisé ici (après DATA_DIR check) — le module gère son propre state en JSON
+// dans DATA_DIR/relance_tracking.json + replies_processed.json + graph-token.json.
+// Il ne fait RIEN au démarrage — poll() n'est déclenché que par schedulerInboxTick().
+try {
+  inboxWatcher.init({
+    config: CONFIG,
+    dataDir: DATA_DIR,
+    helpers: {
+      adleadPost: (p, body) => adleadPost(p, body),
+    },
+  });
+} catch (e) {
+  console.error(`[inboxWatcher] init échec (non bloquant): ${e.message}`);
+}
 
 console.log(`[persistence] Chargé au démarrage: ${pendingLeads.length} lead(s) en attente, ${processedLeads.length} lead(s) traité(s)`);
 if (pendingLeads.length > 0) {
@@ -805,6 +831,21 @@ async function processPendingLead(entry) {
     await sendEmailViaPowerAutomate(email, subject, htmlBody);
     console.log(`[process] ✅ email envoyé à ${email} — "${subject}" (accroche: ${accroche ? 'oui' : 'non'})`);
 
+    // ── Tracking pour le reply handler : on garde (leadId, programId, email, sujet, sentAt)
+    //    pour matcher plus tard les réponses du prospect. Non bloquant si ça plante.
+    try {
+      inboxWatcher.registerSentRelance({
+        leadId: entry.leadId,
+        programId: entry.programId,
+        contactEmail: email,
+        contactName: contact.fullname || '',
+        programName,
+        subject,
+      });
+    } catch (e) {
+      console.error(`[process] ⚠️ registerSentRelance échec (non bloquant): ${e.message}`);
+    }
+
     // ── Notif interne à Norman : mail avec lien Adlead pour qu'il pose l'action à la main
     //    (l'API v1 Adlead n'expose pas d'endpoint pour modifier un lead / créer un event
     //    dans la colonne Événements — voir docs.adlead.immo/v1/leads.html).
@@ -941,6 +982,14 @@ app.get('/api/health', (req, res) => {
         mtime: processedFileStat?.mtime || null,
       },
     },
+    replyHandler: {
+      enabled: CONFIG.REPLY_HANDLER_ENABLED,
+      pollIntervalMs: CONFIG.REPLY_POLL_INTERVAL_MS,
+      anthropicConfigured: !!CONFIG.ANTHROPIC_API_KEY,
+      anthropicModel: CONFIG.ANTHROPIC_MODEL,
+      graphAuthenticated: inboxWatcher.hasGraphCreds(),
+      ...inboxWatcher.getStats(),
+    },
   });
 });
 
@@ -963,15 +1012,20 @@ app.get('/api/stats', (req, res) => {
   for (let i = 13; i >= 0; i--) {
     const d = new Date(now - i * DAY);
     const key = d.toISOString().slice(0, 10);
-    const bucket = { date: key, sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0 };
+    const bucket = {
+      date: key,
+      sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0,
+      whatsappSent: 0, whatsappError: 0,
+    };
     byDayMap[key] = bucket;
     byDay.push(bucket);
   }
 
-  const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0 };
+  const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0 };
+  const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0 };
   const byProgram = {};
-  const today = { sent: 0, cancelled: 0, optout: 0, total: 0 };
-  const week = { sent: 0, cancelled: 0, optout: 0, total: 0 };
+  const today = { sent: 0, cancelled: 0, optout: 0, denounced: 0, total: 0, whatsappSent: 0, whatsappError: 0 };
+  const week  = { sent: 0, cancelled: 0, optout: 0, denounced: 0, total: 0, whatsappSent: 0, whatsappError: 0 };
 
   for (const l of processedLeads) {
     const st = l.status || 'skipped';
@@ -982,14 +1036,40 @@ app.get('/api/stats', (req, res) => {
       byDayMap[dayKey][st] += 1;
     }
 
+    // ── Métriques WhatsApp (best-effort, ne comptent que sur les leads 'sent')
+    //    Si l'envoi a été tenté (whatsappEnabled=true ET whatsappTo renseigné) :
+    //      - succès  → whatsappSid présent et pas d'erreur
+    //      - erreur  → whatsappError non null
+    //      - skipped → whatsappEnabled=true mais pas de téléphone / optout
+    if (st === 'sent' && l.whatsappEnabled) {
+      whatsapp.enabledLeads += 1;
+      if (l.whatsappSid && !l.whatsappError) {
+        whatsapp.sent += 1;
+        if (byDayMap[dayKey]) byDayMap[dayKey].whatsappSent += 1;
+      } else if (l.whatsappError) {
+        whatsapp.error += 1;
+        if (byDayMap[dayKey]) byDayMap[dayKey].whatsappError += 1;
+      } else {
+        whatsapp.skipped += 1;
+      }
+    }
+
     const processedAge = now - new Date(l.processedAt || 0).getTime();
     if (processedAge < DAY) {
       today.total += 1;
       if (today[st] !== undefined) today[st] += 1;
+      if (st === 'sent' && l.whatsappEnabled) {
+        if (l.whatsappSid && !l.whatsappError) today.whatsappSent += 1;
+        else if (l.whatsappError)              today.whatsappError += 1;
+      }
     }
     if (processedAge < 7 * DAY) {
       week.total += 1;
       if (week[st] !== undefined) week[st] += 1;
+      if (st === 'sent' && l.whatsappEnabled) {
+        if (l.whatsappSid && !l.whatsappError) week.whatsappSent += 1;
+        else if (l.whatsappError)              week.whatsappError += 1;
+      }
     }
 
     if (l.programName) {
@@ -1004,6 +1084,9 @@ app.get('/api/stats', (req, res) => {
     program: l.programName || '',
     processed_at: l.processedAt,
     created_at: l.createdAt,
+    whatsapp: l.whatsappEnabled
+      ? (l.whatsappSid && !l.whatsappError ? 'sent' : (l.whatsappError ? 'error' : 'skipped'))
+      : null,
   }));
 
   res.json({
@@ -1011,6 +1094,7 @@ app.get('/api/stats', (req, res) => {
     total: processedLeads.length,
     programmes: Object.keys(PROGRAMMES).length,
     counts,
+    whatsapp,
     today,
     week,
     byDay,
@@ -1158,6 +1242,167 @@ app.get('/api/test/adlead-probe', async (req, res) => {
   res.json({ base, programId, leadId, results });
 });
 
+// ─── REPLY HANDLER — AUTH DEVICE CODE FLOW ──────────────────────────────────
+// Flow : Norman ouvre /api/auth/start → le serveur initie le device code, renvoie
+// un lien (https://microsoft.com/devicelogin) + un user_code. Norman clique, tape
+// le code, approuve. Le serveur poll en arrière-plan jusqu'à obtenir les tokens.
+//
+// NB: on utilise le public client ID Azure CLI (04b07795-…) qui fonctionne sur
+// tous les tenants Microsoft 365 sans app registration ni admin-consent explicite.
+
+app.get('/api/auth/start', async (req, res) => {
+  try {
+    const r = await inboxWatcher.startDeviceCodeFlow();
+    // On renvoie un mini-HTML user-friendly (pour être accessible à la souris depuis Railway)
+    if ((req.headers.accept || '').includes('text/html')) {
+      return res.send(renderDeviceCodePage(r));
+    }
+    return res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/auth/status', (req, res) => {
+  res.json(inboxWatcher.getDeviceCodeStatus());
+});
+
+function renderDeviceCodePage(r) {
+  if (r.alreadyInProgress || r.userCode) {
+    return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Auth Microsoft Graph</title>
+<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:60px auto;padding:0 20px;line-height:1.6}code{background:#f4f4f4;padding:4px 8px;border-radius:4px;font-size:1.2em}a.btn{display:inline-block;background:#0078d4;color:#fff;padding:12px 24px;border-radius:4px;text-decoration:none;margin:12px 0}</style>
+</head><body>
+<h1>Connexion Microsoft 365 — pilote réponses prospect</h1>
+<ol>
+  <li>Clique sur le bouton ci-dessous (ça ouvre Microsoft dans un nouvel onglet)</li>
+  <li>Tape le code : <code>${r.userCode}</code></li>
+  <li>Connecte-toi avec <strong>norman.dadon@catella.com</strong> et approuve</li>
+  <li>Reviens ici — c'est fini. Le serveur a les tokens.</li>
+</ol>
+<p><a class="btn" href="${r.verificationUri}" target="_blank" rel="noopener">Ouvrir Microsoft</a></p>
+<p style="color:#888;font-size:14px">Vérifier l'état : <a href="/api/auth/status">/api/auth/status</a></p>
+</body></html>`;
+  }
+  return `<!doctype html><html><body><pre>${JSON.stringify(r, null, 2)}</pre></body></html>`;
+}
+
+// ─── REPLY HANDLER — ENDPOINT DE TEST ───────────────────────────────────────
+// POST /api/test/reply-handler
+// Deux modes :
+//   (a) messageId dans le body/query → fetch le message via Graph, run full flow
+//       avec dryRun=true (pas de brouillon créé, pas de sales-action Adlead)
+//   (b) leadId + subject + body + fromEmail → simulation : classifie + rédige sans
+//       Graph (utile pour Norman avant d'avoir approuvé l'auth).
+// Le body retourné contient category, reasoning, draft HTML, Adlead action prévue.
+app.post('/api/test/reply-handler', async (req, res) => {
+  const body = req.body || {};
+  const messageId = req.query.messageId || body.messageId;
+  const dryRun = String(req.query.dryRun ?? body.dryRun ?? 'true').toLowerCase() !== 'false';
+
+  try {
+    // Mode (a) : message existant dans l'inbox Norman, fetch via Graph
+    if (messageId) {
+      if (!inboxWatcher.hasGraphCreds()) {
+        return res.status(400).json({ error: 'Graph non authentifié — lance /api/auth/start d\'abord' });
+      }
+      // On liste l'inbox des 7 derniers jours et on filtre par id (module n'expose
+      // pas un fetch direct, on reste simple pour le pilote).
+      const all = await inboxWatcher.listRecentReplies({
+        sinceIso: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      const msg = all.find(m => m.id === messageId);
+      if (!msg) {
+        return res.status(404).json({ error: `Message ${messageId} non trouvé dans l'inbox (dernière semaine)` });
+      }
+      const match = inboxWatcher.matchReplyToRelance(msg);
+      const result = await inboxWatcher.handleReply({
+        originalMessage: msg,
+        relance: match?.relance || null,
+        dryRun,
+      });
+      return res.json({
+        mode: 'graph-fetched',
+        dryRun,
+        messageId,
+        matchStrategy: match?.strategy || null,
+        matchedRelance: match?.relance || null,
+        ...result,
+      });
+    }
+
+    // Mode (b) : simulation avec input JSON direct (Graph pas requis)
+    const { leadId, programId, subject, body: replyBody, fromEmail, fromName, contactName, programName, ville, promoteur, accroche } = body;
+    if (!subject && !replyBody) {
+      return res.status(400).json({ error: 'subject ou body requis (ou messageId pour fetch depuis Graph)' });
+    }
+    // Construit le context lead — utilise les relances trackées si leadId fourni
+    let relance = null;
+    if (leadId) {
+      const all = inboxWatcher.getRecentRelances(500);
+      relance = all.find(r => String(r.leadId) === String(leadId)) || null;
+    }
+    const leadContext = {
+      leadId: leadId || relance?.leadId || null,
+      programId: programId || relance?.programId || null,
+      contactEmail: (fromEmail || relance?.contactEmail || '').toLowerCase(),
+      contactName: contactName || fromName || relance?.contactName || '',
+      programName: programName || relance?.programName || '',
+      salutation: contactName || fromName || relance?.contactName || 'Madame, Monsieur',
+    };
+    const programContext = {
+      name: programName || relance?.programName || null,
+      ville: ville || null,
+      promoteur: promoteur || null,
+      accroche: accroche || null,
+    };
+    const fakeMessage = {
+      id: null,
+      subject: subject || '',
+      body: { contentType: 'text', content: replyBody || '' },
+      from: { emailAddress: { address: fromEmail || '' } },
+      receivedDateTime: new Date().toISOString(),
+      conversationId: null,
+    };
+    const result = await inboxWatcher.handleReply({
+      originalMessage: fakeMessage,
+      relance,
+      leadContext,
+      programContext,
+      dryRun: true,  // en simulation, toujours dryRun — on ne crée pas de brouillon ni sales-action
+    });
+    return res.json({
+      mode: 'simulation',
+      dryRun: true,
+      leadContext,
+      programContext,
+      ...result,
+    });
+  } catch (e) {
+    console.error('[test/reply-handler] erreur:', e);
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
+// ─── REPLY HANDLER — TRIGGER MANUEL DU POLL ────────────────────────────────
+app.post('/api/reply-handler/poll', async (req, res) => {
+  try {
+    const r = await inboxWatcher.poll();
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── REPLY HANDLER — DASHBOARD ────────────────────────────────────────────
+app.get('/api/dashboard/replies', (req, res) => {
+  res.json({
+    stats: inboxWatcher.getStats(),
+    recentReplies: inboxWatcher.getRecentReplies(50),
+    recentRelancesTracked: inboxWatcher.getRecentRelances(50),
+  });
+});
+
 app.post('/webhook/adlead', (req, res) => {
   if (!verifyAdleadSignature(req)) {
     console.warn('[webhook] Signature invalide');
@@ -1192,3 +1437,28 @@ app.listen(CONFIG.PORT, () => {
 
 setInterval(schedulerTick, CONFIG.SCHEDULER_INTERVAL_MS);
 schedulerTick().catch(e => console.error('[scheduler] tick initial:', e.message));
+
+// ─── SCHEDULER INBOX (réponses prospect) ────────────────────────────────────
+// Poll séparé pour ne pas ralentir le scheduler principal. Kill-switch via
+// REPLY_HANDLER_ENABLED=false — si inactif, le tick ne fait rien (même pas
+// d'appel Graph).
+let inboxTickRunning = false;
+async function inboxSchedulerTick() {
+  if (inboxTickRunning) return;
+  if (!CONFIG.REPLY_HANDLER_ENABLED) return;
+  if (!CONFIG.ANTHROPIC_API_KEY)     return;
+  if (!inboxWatcher.hasGraphCreds()) return;
+  inboxTickRunning = true;
+  try {
+    const r = await inboxWatcher.poll();
+    if (r && r.matched > 0) {
+      console.log(`[inbox-scheduler] ${r.matched}/${r.polled} message(s) traité(s)`);
+    }
+  } catch (e) {
+    console.error('[inbox-scheduler] erreur:', e.message);
+  } finally {
+    inboxTickRunning = false;
+  }
+}
+setInterval(inboxSchedulerTick, CONFIG.REPLY_POLL_INTERVAL_MS);
+// Pas de tick initial — on attend que Norman ait fait l'auth.
