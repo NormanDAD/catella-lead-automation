@@ -377,6 +377,30 @@ async function fetchProgramRegistrations(programId, { maxPages = 3 } = {}) {
   return all;
 }
 
+// Extrait l'id du lead depuis une registration Adlead en couvrant toutes les
+// formes plausibles renvoyées par l'API (snake_case, camelCase, objet imbriqué).
+// Utile parce que selon la version/endpoint Adlead peut exposer :
+//   { lead_id: 123 }                  ou
+//   { leadId: 123 }                   ou
+//   { lead: { id: 123 } }             ou
+//   { lead: 123 }                     (id direct)
+// Si AUCUN de ces champs n'est numérique, on remonte NaN → pas de match silencieux.
+function extractLeadIdFromRegistration(r) {
+  if (!r) return NaN;
+  const candidates = [
+    r.lead_id,
+    r.leadId,
+    r.lead && typeof r.lead === 'object' ? r.lead.id : r.lead,
+    r.lead_uid,
+    r.lead_ref,
+  ];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return NaN;
+}
+
 // Vrai si le lead a une dénonciation "bloquante" active sur le programme :
 //   - status pending  (en cours d'arbitrage → on attend, donc on skip)
 //   - status approved ET expires_at > maintenant
@@ -387,8 +411,19 @@ async function findActiveRegistrationForLead(programId, leadId) {
   const regs = await fetchProgramRegistrations(programId);
   const now = Date.now();
   const leadIdNum = Number(leadId);
-  const match = regs.find(r => {
-    if (Number(r.lead_id) !== leadIdNum) return false;
+
+  // Observabilité : on log systématiquement la distribution pour ce programme
+  // (avant de filtrer par lead) — indispensable pour détecter un shift de schéma
+  // côté Adlead (ex: `lead_id` → `lead.id`) qui rendrait le filtre aveugle.
+  const matchingForLead = regs.filter(r => extractLeadIdFromRegistration(r) === leadIdNum);
+  const firstKeys = regs[0] ? Object.keys(regs[0]).join(',') : '(aucune registration)';
+  console.log(`[registrations] programme ${programId} / lead ${leadId}: ${regs.length} reg(s) total, ${matchingForLead.length} match lead — schema keys du premier: ${firstKeys}`);
+  if (matchingForLead.length > 0) {
+    const summary = matchingForLead.map(r => `#${r.id}:${r.status}${r.expires_at ? `(exp=${r.expires_at})` : ''}`).join(', ');
+    console.log(`[registrations] lead ${leadId} → registrations trouvées: ${summary}`);
+  }
+
+  const match = matchingForLead.find(r => {
     if (r.status === 'pending') return true;
     if (r.status === 'approved') {
       if (!r.expires_at) return true; // approuvée sans date → considère active
@@ -1240,6 +1275,43 @@ app.get('/api/test/adlead-probe', async (req, res) => {
     }
   }
   res.json({ base, programId, leadId, results });
+});
+
+// Dump brut des registrations d'un programme — utilisé pour vérifier le schéma
+// exact (noms de champs) quand le filtre "skip dénoncé" rate un lead.
+// Usage : GET /api/test/registrations-dump?programId=611&leadId=1633940
+// Retourne la liste complète (page 1) + le(s) registration(s) matchant le lead
+// si leadId est fourni.
+app.get('/api/test/registrations-dump', async (req, res) => {
+  const programId = req.query.programId;
+  const leadId = req.query.leadId ? Number(req.query.leadId) : null;
+  if (!programId) return res.status(400).json({ error: 'programId requis' });
+  const base = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}`;
+  try {
+    const url = `${base}/programs/${programId}/registrations?page=1&per_page=100`;
+    const r = await fetch(url, {
+      headers: { 'X-API-Key': CONFIG.ADLEAD_API_KEY, 'Accept': 'application/json' },
+    });
+    const status = r.status;
+    const json = await r.json().catch(() => null);
+    const data = Array.isArray(json?.data) ? json.data : [];
+    const firstKeys = data[0] ? Object.keys(data[0]) : [];
+    const matching = leadId
+      ? data.filter(reg => extractLeadIdFromRegistration(reg) === leadId)
+      : [];
+    res.json({
+      url,
+      status,
+      meta: json?.meta || null,
+      count: data.length,
+      firstRegistrationKeys: firstKeys,
+      firstRegistration: data[0] || null,
+      matchingForLead: matching,
+      rawResponseSample: JSON.stringify(json).slice(0, 4000),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── REPLY HANDLER — AUTH DEVICE CODE FLOW ──────────────────────────────────
