@@ -126,6 +126,51 @@
   .kpi-card.accent-green .kpi-value { color: var(--green); }
   .kpi-card.accent-blue .kpi-value { color: var(--blue); }
   .kpi-card.accent-orange .kpi-value { color: var(--orange); }
+  .kpi-card.accent-purple .kpi-value { color: var(--purple); }
+
+  /* KPI alarmant (fail-closed > 0) — pulse rouge continu */
+  .kpi-card.alarm {
+    border-color: var(--catella-red);
+    background: linear-gradient(135deg, #fff 0%, #fff5f6 100%);
+    animation: alarmPulse 2s ease-in-out infinite;
+  }
+  .kpi-card.alarm .kpi-value { color: var(--catella-red); }
+  .kpi-card.alarm .kpi-label { color: var(--catella-red); }
+  @keyframes alarmPulse {
+    0%, 100% { box-shadow: 0 0 0 rgba(200, 16, 46, 0); }
+    50% { box-shadow: 0 0 16px rgba(200, 16, 46, 0.25); }
+  }
+
+  /* Health bar — voyants services externes */
+  .health-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .health-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .health-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .health-dot.healthy { background: var(--green); box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.15); }
+  .health-dot.degraded { background: var(--orange); box-shadow: 0 0 0 3px rgba(255, 149, 0, 0.2); animation: pulse 2s infinite; }
+  .health-dot.down { background: var(--catella-red); box-shadow: 0 0 0 3px rgba(200, 16, 46, 0.2); animation: pulse 1.4s infinite; }
+  .health-dot.unknown { background: var(--text-dim); }
+  .health-body { flex: 1; min-width: 0; }
+  .health-label { font-weight: 600; }
+  .health-note { color: var(--text-dim); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Grid layout */
   .grid {
@@ -212,6 +257,50 @@
   .feed-status.error { background: #fde8eb; color: var(--catella-red); }
   .feed-status.pending { background: #e5f1ff; color: var(--blue); }
   .feed-status.skipped { background: #f3e8fa; color: var(--purple); }
+  .feed-status.denounced { background: #fde8eb; color: var(--catella-red); }
+  .feed-status.failclosed { background: #fde8eb; color: var(--catella-red); border: 1px solid var(--catella-red); }
+  .feed-reason {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 3px;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .feed-actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 6px;
+  }
+  .feed-btn {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+  .feed-btn:hover {
+    background: var(--bg);
+    border-color: var(--text-dim);
+  }
+  .feed-btn.primary {
+    background: var(--catella-red);
+    color: white;
+    border-color: var(--catella-red);
+  }
+  .feed-btn.primary:hover {
+    background: #a10d26;
+    border-color: #a10d26;
+  }
+  .feed-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   /* Programmes table */
   .prog-list {
@@ -219,14 +308,18 @@
     overflow-y: auto;
   }
   .prog-item {
-    display: flex;
-    justify-content: space-between;
-    padding: 8px 0;
+    padding: 10px 0;
     border-bottom: 1px solid var(--border);
     font-size: 13px;
   }
   .prog-item:last-child { border-bottom: none; }
-  .prog-name { font-weight: 500; }
+  .prog-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .prog-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .prog-count {
     background: var(--bg);
     padding: 2px 8px;
@@ -235,6 +328,31 @@
     font-weight: 600;
     font-size: 12px;
   }
+  .prog-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .prog-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .prog-chip.sent { background: #e8f7ee; color: #1d7a3a; }
+  .prog-chip.denounced { background: #fde8eb; color: var(--catella-red); }
+  .prog-chip.failclosed { background: #fde8eb; color: var(--catella-red); border: 1px solid var(--catella-red); }
+  .prog-chip.optout { background: #fff4e5; color: #b35500; }
+  .prog-rate {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .prog-rate strong { color: var(--green); }
 
   /* Chart */
   canvas { max-height: 280px !important; }
@@ -297,6 +415,31 @@
     </div>
   </header>
 
+  <!-- Santé système : voyants services externes -->
+  <div class="health-bar" id="health-bar">
+    <div class="health-item">
+      <div class="health-dot unknown" id="health-adlead-dot"></div>
+      <div class="health-body">
+        <div class="health-label">Adlead — dénonciations</div>
+        <div class="health-note" id="health-adlead-note">—</div>
+      </div>
+    </div>
+    <div class="health-item">
+      <div class="health-dot unknown" id="health-pa-dot"></div>
+      <div class="health-body">
+        <div class="health-label">Power Automate (emails)</div>
+        <div class="health-note" id="health-pa-note">—</div>
+      </div>
+    </div>
+    <div class="health-item">
+      <div class="health-dot unknown" id="health-twilio-dot"></div>
+      <div class="health-body">
+        <div class="health-label">Twilio (WhatsApp)</div>
+        <div class="health-note" id="health-twilio-note">—</div>
+      </div>
+    </div>
+  </div>
+
   <!-- KPIs -->
   <div class="kpi-grid">
     <div class="kpi-card accent-blue">
@@ -328,6 +471,26 @@
       <div class="kpi-label">Total traité</div>
       <div class="kpi-value" id="kpi-total">—</div>
       <div class="kpi-delta" id="kpi-prog-count">—</div>
+    </div>
+    <div class="kpi-card accent-green">
+      <div class="kpi-label">WhatsApp aujourd'hui</div>
+      <div class="kpi-value" id="kpi-whatsapp-today">—</div>
+      <div class="kpi-delta" id="kpi-whatsapp-sub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Leads dénoncés</div>
+      <div class="kpi-value" id="kpi-denounced">—</div>
+      <div class="kpi-delta">Skip ERP / prescripteur</div>
+    </div>
+    <div class="kpi-card" id="kpi-failclosed-card">
+      <div class="kpi-label">À traiter manuellement</div>
+      <div class="kpi-value" id="kpi-failclosed">—</div>
+      <div class="kpi-delta" id="kpi-failclosed-sub">Bloqués par fail-closed</div>
+    </div>
+    <div class="kpi-card accent-purple">
+      <div class="kpi-label">Taux d'efficacité</div>
+      <div class="kpi-value" id="kpi-efficiency">—</div>
+      <div class="kpi-delta" id="kpi-efficiency-sub">Envoyés / décidés</div>
     </div>
   </div>
 
@@ -404,6 +567,12 @@
     return d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
   }
 
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function renderFeed(recent) {
     const f = el('feed');
     if (!recent || recent.length === 0) {
@@ -411,21 +580,45 @@
       return;
     }
     f.innerHTML = recent.map(r => {
-      const status = r.status || 'pending';
+      const rawStatus = r.status || 'pending';
+      // Fail-closed a son propre badge (même statut 'skipped' techniquement, mais affiché à part)
+      const displayStatus = r.failClosed ? 'failclosed' : rawStatus;
+      const displayLabel = r.failClosed ? 'à traiter' : rawStatus;
       const when = r.processed_at || r.created_at;
-      const prog = r.program || '—';
+      const prog = esc(r.program || '—');
+      const waBadge = r.whatsapp === 'sent'
+        ? ' · <span style="color:#25D366;font-weight:600;">WhatsApp ✓</span>'
+        : r.whatsapp === 'error'
+          ? ' · <span style="color:var(--catella-red);font-weight:600;">WhatsApp ✗</span>'
+          : '';
+      const reasonHtml = r.reason ? `<div class="feed-reason">${esc(r.reason)}</div>` : '';
+      // Bouton "Traiter maintenant" : uniquement pour les leads non-envoyés avec un leadId valide
+      let actionsHtml = '';
+      if (rawStatus !== 'sent' && r.leadId && r.programId) {
+        const label = r.failClosed ? 'Forcer l\'envoi' : 'Retraiter';
+        const btnClass = r.failClosed ? 'feed-btn primary' : 'feed-btn';
+        actionsHtml = `
+          <div class="feed-actions">
+            <button class="${btnClass}" onclick="processNow(${r.leadId}, ${r.programId}, ${r.interestId || 'null'}, this)">
+              ${label}
+            </button>
+          </div>
+        `;
+      }
       return `
         <div class="feed-item">
-          <div class="feed-dot ${status}"></div>
+          <div class="feed-dot ${rawStatus}"></div>
           <div class="feed-content">
             <div class="feed-main">
-              <div class="feed-email">${r.email || '—'}</div>
+              <div class="feed-email">${esc(r.email || '—')}</div>
               <div class="feed-time">${timeAgo(when)}</div>
             </div>
             <div class="feed-meta">
-              <span class="feed-status ${status}">${status}</span>
-              · ${prog}
+              <span class="feed-status ${displayStatus}">${displayLabel}</span>
+              · ${prog}${waBadge}
             </div>
+            ${reasonHtml}
+            ${actionsHtml}
           </div>
         </div>
       `;
@@ -434,17 +627,95 @@
 
   function renderProgrammes(byProgram) {
     const container = el('prog-list');
-    const entries = Object.entries(byProgram || {}).sort((a,b) => b[1] - a[1]);
+    // byProgram est maintenant un objet { name: { total, sent, denounced, failClosed, optout, ... } }
+    // (rétrocompat avec l'ancien format nombre : on détecte et on affiche simple).
+    const entries = Object.entries(byProgram || {});
     if (entries.length === 0) {
       container.innerHTML = '<div style="color: var(--text-dim); font-size: 13px;">Aucun lead pour le moment.</div>';
       return;
     }
-    container.innerHTML = entries.slice(0, 20).map(([name, count]) => `
-      <div class="prog-item">
-        <div class="prog-name">${name}</div>
-        <div class="prog-count">${fmt.format(count)}</div>
-      </div>
-    `).join('');
+    // Trier par total décroissant
+    entries.sort((a, b) => {
+      const ta = typeof a[1] === 'object' ? a[1].total : a[1];
+      const tb = typeof b[1] === 'object' ? b[1].total : b[1];
+      return tb - ta;
+    });
+    container.innerHTML = entries.slice(0, 20).map(([name, data]) => {
+      // Rétrocompat : ancien format = simple compteur
+      if (typeof data !== 'object') {
+        return `
+          <div class="prog-item">
+            <div class="prog-row">
+              <div class="prog-name">${esc(name)}</div>
+              <div class="prog-count">${fmt.format(data)}</div>
+            </div>
+          </div>
+        `;
+      }
+      const eligible = (data.sent || 0) + (data.cancelled || 0) + (data.optout || 0) + (data.denounced || 0);
+      const rate = eligible > 0 ? Math.round((data.sent / eligible) * 1000) / 10 : null;
+      const rateHtml = rate != null
+        ? `<div class="prog-rate"><strong>${rate}%</strong> envoyé</div>`
+        : '';
+      const chips = [];
+      if (data.sent)       chips.push(`<span class="prog-chip sent">${data.sent} env.</span>`);
+      if (data.denounced)  chips.push(`<span class="prog-chip denounced">${data.denounced} dénoncé${data.denounced>1?'s':''}</span>`);
+      if (data.failClosed) chips.push(`<span class="prog-chip failclosed">${data.failClosed} à traiter</span>`);
+      if (data.optout)     chips.push(`<span class="prog-chip optout">${data.optout} opt-out</span>`);
+      if (data.cancelled)  chips.push(`<span class="prog-chip">${data.cancelled} annulés</span>`);
+      return `
+        <div class="prog-item">
+          <div class="prog-row">
+            <div class="prog-name">${esc(name)}</div>
+            <div class="prog-count">${fmt.format(data.total)}</div>
+          </div>
+          ${chips.length ? `<div class="prog-chips">${chips.join('')}</div>` : ''}
+          ${rateHtml}
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderHealth(services) {
+    const render = (key, dotId, noteId) => {
+      const s = services?.[key];
+      const dot = el(dotId);
+      const note = el(noteId);
+      if (!dot || !note) return;
+      // reset
+      dot.className = 'health-dot';
+      if (!s) { dot.classList.add('unknown'); note.textContent = '—'; return; }
+      dot.classList.add(s.status || (s.ok ? 'healthy' : 'down'));
+      note.textContent = s.note || '';
+      note.title = s.note || '';
+    };
+    render('adleadRegistrations', 'health-adlead-dot', 'health-adlead-note');
+    render('powerAutomate', 'health-pa-dot', 'health-pa-note');
+    render('twilio', 'health-twilio-dot', 'health-twilio-note');
+  }
+
+  // Déclenche le traitement immédiat d'un lead (POST /api/test/process-now)
+  // Utilisé par le bouton "Retraiter" / "Forcer l'envoi" dans le feed.
+  async function processNow(leadId, programId, interestId, btn) {
+    if (!leadId || !programId) { toast('Erreur', 'leadId ou programId manquant'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      const params = new URLSearchParams({ leadId: String(leadId), programId: String(programId), force: '1' });
+      if (interestId) params.set('interestId', String(interestId));
+      const r = await fetch('/api/test/process-now?' + params.toString(), { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d?.result?.status === 'sent') {
+        toast('✅ Envoyé', `Lead ${leadId} — relance forcée`);
+      } else if (r.ok) {
+        toast('ℹ️ Traité', `Lead ${leadId} — statut: ${d?.result?.status || 'inconnu'}`);
+      } else {
+        toast('❌ Échec', `Lead ${leadId} — HTTP ${r.status}`);
+      }
+    } catch (e) {
+      toast('❌ Erreur', String(e.message || e));
+    } finally {
+      setTimeout(refresh, 400);
+    }
   }
 
   function renderChart(byDay) {
@@ -546,6 +817,37 @@
       el('kpi-optout').textContent = fmt.format(d.counts?.optout || 0);
       el('kpi-total').textContent = fmt.format(d.total || 0);
       el('kpi-prog-count').textContent = `${d.programmes || 0} programmes en base`;
+
+      // ── WhatsApp & dénonciations (rétrocompatible : champs nouveaux = 0 par défaut)
+      const waToday = d.today?.whatsappSent || 0;
+      const waTodayErr = d.today?.whatsappError || 0;
+      el('kpi-whatsapp-today').textContent = fmt.format(waToday);
+      el('kpi-whatsapp-sub').textContent = waTodayErr
+        ? `${waTodayErr} erreur(s) aujourd'hui`
+        : `${d.whatsapp?.sent || 0} envoyés au total`;
+      el('kpi-denounced').textContent = fmt.format(d.counts?.denounced || 0);
+
+      // ── Fail-closed : KPI critique, passe en alarme rouge pulsante si > 0
+      const failClosedTotal = d.registrationsFailClosedTotal || 0;
+      const failClosedBoot = d.registrationsFailClosed || 0;
+      el('kpi-failclosed').textContent = fmt.format(failClosedTotal);
+      el('kpi-failclosed-sub').textContent = failClosedTotal > 0
+        ? `${failClosedBoot} depuis reboot · à traiter dans Adlead`
+        : 'Bloqués par fail-closed';
+      const fcCard = el('kpi-failclosed-card');
+      if (failClosedTotal > 0) fcCard.classList.add('alarm');
+      else fcCard.classList.remove('alarm');
+
+      // ── Taux d'efficacité : sent / (sent+cancelled+optout+denounced)
+      const eff = d.efficiencyRate;
+      el('kpi-efficiency').textContent = eff == null ? '—' : `${eff}%`;
+      const totalDecided = (d.counts?.sent || 0) + (d.counts?.cancelled || 0) + (d.counts?.optout || 0) + (d.counts?.denounced || 0);
+      el('kpi-efficiency-sub').textContent = totalDecided > 0
+        ? `${d.counts?.sent || 0} envoyés sur ${totalDecided} décidés`
+        : 'Envoyés / décidés';
+
+      // ── Santé système (3 voyants)
+      renderHealth(d.services);
 
       renderChart(d.byDay);
       renderProgrammes(d.byProgram);

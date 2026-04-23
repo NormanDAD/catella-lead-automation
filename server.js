@@ -1236,9 +1236,22 @@ app.get('/api/stats', (req, res) => {
 
   const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0 };
   const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0 };
+  // byProgram enrichi : pour chaque programme on stocke un objet avec le détail
+  // des statuts au lieu d'un simple total, pour pouvoir afficher un mini-tableau
+  // dans le dashboard (sent / denounced / failClosed / taux).
   const byProgram = {};
-  const today = { sent: 0, cancelled: 0, optout: 0, denounced: 0, total: 0, whatsappSent: 0, whatsappError: 0 };
-  const week  = { sent: 0, cancelled: 0, optout: 0, denounced: 0, total: 0, whatsappSent: 0, whatsappError: 0 };
+  const today = { sent: 0, cancelled: 0, optout: 0, denounced: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
+  const week  = { sent: 0, cancelled: 0, optout: 0, denounced: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
+  // Compteurs pour la santé des services externes — on scanne les leads récents
+  // (< 1 h) pour détecter des erreurs Twilio / Power Automate et déduire l'état.
+  const RECENT = 60 * 60 * 1000; // 1 h
+  let recentProcessed = 0;
+  let recentEmailErrors = 0;      // erreurs envoi email (Power Automate)
+  let recentWhatsappErrors = 0;   // erreurs WhatsApp (Twilio)
+  let recentWhatsappAttempts = 0;
+  // Compteur spécifique fail-closed (comptant TOUS les leads marqués failClosed,
+  // pas seulement ceux passés par le compteur runtime — utile après reboot).
+  let totalFailClosed = 0;
 
   for (const l of processedLeads) {
     const st = l.status || 'skipped';
@@ -1271,6 +1284,7 @@ app.get('/api/stats', (req, res) => {
     if (processedAge < DAY) {
       today.total += 1;
       if (today[st] !== undefined) today[st] += 1;
+      if (l.registrationsFailClosed) today.failClosed += 1;
       if (st === 'sent' && l.whatsappEnabled) {
         if (l.whatsappSid && !l.whatsappError) today.whatsappSent += 1;
         else if (l.whatsappError)              today.whatsappError += 1;
@@ -1279,22 +1293,83 @@ app.get('/api/stats', (req, res) => {
     if (processedAge < 7 * DAY) {
       week.total += 1;
       if (week[st] !== undefined) week[st] += 1;
+      if (l.registrationsFailClosed) week.failClosed += 1;
       if (st === 'sent' && l.whatsappEnabled) {
         if (l.whatsappSid && !l.whatsappError) week.whatsappSent += 1;
         else if (l.whatsappError)              week.whatsappError += 1;
       }
     }
 
+    // Santé des services : fenêtre glissante 1 h sur les leads récents
+    if (processedAge < RECENT) {
+      recentProcessed += 1;
+      if (st === 'error') recentEmailErrors += 1;
+      if (l.whatsappEnabled) {
+        recentWhatsappAttempts += 1;
+        if (l.whatsappError) recentWhatsappErrors += 1;
+      }
+    }
+
+    if (l.registrationsFailClosed) totalFailClosed += 1;
+
     if (l.programName) {
-      byProgram[l.programName] = (byProgram[l.programName] || 0) + 1;
+      if (!byProgram[l.programName]) {
+        byProgram[l.programName] = {
+          total: 0, sent: 0, cancelled: 0, optout: 0, denounced: 0, skipped: 0, error: 0, failClosed: 0,
+        };
+      }
+      const p = byProgram[l.programName];
+      p.total += 1;
+      if (p[st] !== undefined) p[st] += 1;
+      if (l.registrationsFailClosed) p.failClosed += 1;
     }
   }
 
+  // ── Taux d'efficacité global : sent / leads finalisés sur décision automatique
+  //    (on exclut skipped/error qui sont des "pas de décision" ou échecs techniques).
+  //    Numerator = sent. Denominator = sent + cancelled + optout + denounced.
+  const eligible = counts.sent + counts.cancelled + counts.optout + counts.denounced;
+  const efficiencyRate = eligible > 0 ? Math.round((counts.sent / eligible) * 1000) / 10 : null;
+
+  // ── Santé des services externes (dérivée des leads récents, sans ping direct)
+  //    Règle : >=2 erreurs dans la dernière heure OU >50% d'échecs → KO.
+  //    adleadRegistrations : état dérivé du compteur fail-closed.
+  const buildHealth = (label, errors, attempts, degradedThreshold = 2) => {
+    if (attempts === 0) return { ok: true, label, status: 'unknown', note: 'aucune donnée récente' };
+    const rate = errors / attempts;
+    const ok = errors < degradedThreshold && rate < 0.5;
+    return {
+      ok,
+      label,
+      status: ok ? 'healthy' : 'degraded',
+      note: `${errors}/${attempts} erreurs en 1 h`,
+    };
+  };
+  const services = {
+    adleadRegistrations: {
+      ok: totalFailClosed === 0 && RUNTIME_STATS.registrationsFailClosed === 0,
+      label: 'Adlead — dénonciations',
+      status: (totalFailClosed === 0 && RUNTIME_STATS.registrationsFailClosed === 0) ? 'healthy' : 'down',
+      note: (totalFailClosed === 0 && RUNTIME_STATS.registrationsFailClosed === 0)
+        ? 'endpoint /registrations accessible'
+        : `fail-closed actif (${RUNTIME_STATS.registrationsFailClosed} depuis boot, ${totalFailClosed} total)`,
+    },
+    powerAutomate: buildHealth('Power Automate (emails)', recentEmailErrors, Math.max(recentProcessed, 1)),
+    twilio: buildHealth('Twilio (WhatsApp)', recentWhatsappErrors, recentWhatsappAttempts),
+  };
+
   const recent = processedLeads.slice(-20).reverse().map(l => ({
     id: l.id,
+    leadId: l.leadId,
+    programId: l.programId,
+    interestId: l.interestId || l.id,
     status: l.status,
     email: (l.email || '').replace(/(.{2}).*(@.*)/, '$1***$2'),
     program: l.programName || '',
+    // Raison lisible : si envoyé, null ; sinon on expose le champ le plus explicite
+    // (reason > error) tronqué pour l'affichage.
+    reason: l.status === 'sent' ? null : (l.reason || l.error || '').slice(0, 200),
+    failClosed: !!l.registrationsFailClosed,
     processed_at: l.processedAt,
     created_at: l.createdAt,
     whatsapp: l.whatsappEnabled
@@ -1313,10 +1388,13 @@ app.get('/api/stats', (req, res) => {
     byDay,
     byProgram,
     recent,
+    efficiencyRate,
+    services,
     // Santé du filtre dénonciation — si > 0, l'endpoint /registrations est
     // inaccessible (probablement clé API sans scope registrations:read) et
     // des leads ont été bloqués par le fail-closed. Cf. CONFIG.SKIP_REGISTRATIONS_CHECK.
     registrationsFailClosed: RUNTIME_STATS.registrationsFailClosed,
+    registrationsFailClosedTotal: totalFailClosed,
     skipRegistrationsCheck: CONFIG.SKIP_REGISTRATIONS_CHECK,
   });
 });
