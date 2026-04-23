@@ -340,6 +340,48 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   return sendEmailViaPowerAutomate(to, subject, html);
 }
 
+// Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
+// (le pipeline n'a pas pu vérifier si le lead est dénoncé, donc n'envoie RIEN).
+// Objectif : Norman va traiter manuellement — soit constater la dénonciation et
+// laisser tomber, soit envoyer lui-même la relance si le lead est sain.
+async function sendFailClosedNotif({ programId, leadId, contactName, contactEmail, programName, reason, receivedAt }) {
+  const to = CONFIG.INTERNAL_NOTIF_EMAIL;
+  const when = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+  const adleadUrl = buildAdleadLeadUrl(programId, leadId);
+  // Âge du lead depuis réception webhook (utile pour prioriser le traitement)
+  let ageTxt = '';
+  if (receivedAt) {
+    const ageMs = Date.now() - new Date(receivedAt).getTime();
+    const ageH = Math.round(ageMs / (60 * 60 * 1000));
+    ageTxt = ` (reçu il y a ~${ageH}h)`;
+  }
+  const subject = `⚠️ [Catella — À TRAITER] ${programName || 'Programme inconnu'} — ${contactName || contactEmail}${ageTxt}`;
+  const html = `
+<!doctype html>
+<html lang="fr"><body style="font-family: Arial, sans-serif; font-size: 14px; color: #222; line-height: 1.55;">
+  <p>Bonjour Norman,</p>
+  <p>Un lead arrivé au scheduler à <strong>${when}</strong> <strong>n'a pas été relancé automatiquement</strong> car le check dénonciation est en fail-closed (l'API Adlead <code>/registrations</code> est inaccessible, probablement en attente du scope <code>registrations:read</code>).</p>
+  <p>👉 <strong>Tu dois traiter ce lead manuellement</strong> — vérifier dans Adlead s'il est dénoncé :
+    <ul style="list-style: none; padding-left: 0;">
+      <li>• Si <strong>dénoncé</strong> → ne rien faire, le prescripteur le prend en charge.</li>
+      <li>• Si <strong>pas dénoncé</strong> → envoie-lui un mail de relance manuellement depuis Outlook.</li>
+    </ul>
+  </p>
+  <p><strong>Détails du lead :</strong></p>
+  <ul style="list-style: none; padding-left: 0;">
+    <li>• <strong>Contact</strong> : ${contactName || '(nom inconnu)'}</li>
+    <li>• <strong>Email</strong> : ${contactEmail || '(email inconnu)'}</li>
+    <li>• <strong>Programme</strong> : ${programName || '(programme inconnu)'}</li>
+    <li>• <strong>Reçu le</strong> : ${receivedAt || '(inconnu)'}${ageTxt}</li>
+    <li>• <strong>Lien Adlead</strong> : <a href="${adleadUrl}">${adleadUrl}</a></li>
+  </ul>
+  <p style="color: #666; font-size: 12px;"><em>Raison du blocage : ${reason || 'fail-closed dénonciation'}</em></p>
+  <p style="color: #888; font-size: 12px;">Pour lever ce blocage : passer <code>SKIP_REGISTRATIONS_CHECK=true</code> dans les env vars Railway (bypass d'urgence) ou attendre qu'Adlead active le scope <code>registrations:read</code> sur la clé API.</p>
+  <p style="color: #888; font-size: 12px;">— Pipeline Catella Lead Automation</p>
+</body></html>`;
+  return sendEmailViaPowerAutomate(to, subject, html);
+}
+
 async function fetchLead(leadId) {
   // Try with includes for interests so we can read status from there
   try {
@@ -888,6 +930,24 @@ async function processPendingLead(entry) {
         // pour ne pas risquer d'envoyer sur une dénonciation qu'on aurait
         // manquée. Bypass via SKIP_REGISTRATIONS_CHECK=true (voir CONFIG).
         console.log(`[process] lead ${entry.leadId} SKIP fail-closed (registrations inaccessible, statut=${activeReg.status})`);
+        // Notif interne à Norman pour qu'il aille traiter manuellement le lead
+        // (vérifier dénonciation dans Adlead, et envoyer la relance à la main si OK).
+        // Best-effort : on n'empêche pas le finalize si l'envoi du mail plante.
+        const programNameForNotif = interest?.program?.name || `Programme #${entry.programId}`;
+        try {
+          await sendFailClosedNotif({
+            programId: entry.programId,
+            leadId: entry.leadId,
+            contactName: contact.fullname || '',
+            contactEmail: email,
+            programName: programNameForNotif,
+            reason: activeReg.error || `HTTP ${activeReg.status}`,
+            receivedAt: entry.receivedAt,
+          });
+          console.log(`[process] ✅ notif fail-closed envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL} (lead ${entry.leadId})`);
+        } catch (e) {
+          console.error(`[process] ⚠️ envoi notif fail-closed échec lead ${entry.leadId}: ${e.message}`);
+        }
         return finalize({
           id: entry.interestId,
           status: 'skipped',
@@ -895,6 +955,7 @@ async function processPendingLead(entry) {
           contactName: contact.fullname || '',
           email,
           programId: entry.programId,
+          programName: programNameForNotif,
           registrationsFailClosed: true,
           registrationsFailClosedStatus: activeReg.status,
         });
@@ -924,6 +985,21 @@ async function processPendingLead(entry) {
       if (!CONFIG.SKIP_REGISTRATIONS_CHECK) {
         RUNTIME_STATS.registrationsFailClosed += 1;
         console.log(`[registrations] BLOQUÉ (exception): lead ${entry.leadId} programme ${entry.programId}, error=${e.message}`);
+        const programNameForNotif = interest?.program?.name || `Programme #${entry.programId}`;
+        try {
+          await sendFailClosedNotif({
+            programId: entry.programId,
+            leadId: entry.leadId,
+            contactName: contact.fullname || '',
+            contactEmail: email,
+            programName: programNameForNotif,
+            reason: `exception: ${e.message}`,
+            receivedAt: entry.receivedAt,
+          });
+          console.log(`[process] ✅ notif fail-closed envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL} (lead ${entry.leadId})`);
+        } catch (err2) {
+          console.error(`[process] ⚠️ envoi notif fail-closed échec lead ${entry.leadId}: ${err2.message}`);
+        }
         return finalize({
           id: entry.interestId,
           status: 'skipped',
@@ -931,6 +1007,7 @@ async function processPendingLead(entry) {
           contactName: contact.fullname || '',
           email,
           programId: entry.programId,
+          programName: programNameForNotif,
           registrationsFailClosed: true,
         });
       }
