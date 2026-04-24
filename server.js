@@ -55,6 +55,17 @@ const CONFIG = {
   // Mettre SKIP_REGISTRATIONS_CHECK=true pour bypasser ce fail-closed en
   // urgence (à utiliser en connaissance de cause).
   SKIP_REGISTRATIONS_CHECK: process.env.SKIP_REGISTRATIONS_CHECK === 'true',
+  // ── Kill switches d'urgence ───────────────────────────────────────────────
+  // INTERNAL_NOTIF_DISABLED : si true, on n'envoie AUCUN mail interne à Norman
+  //   (ni sendInternalNotif ni sendFailClosedNotif). Les mails aux prospects
+  //   partent quand même si le pipeline passe le check dénonciation. Utile
+  //   quand les notifs fail-closed spamment la boîte pendant qu'Adlead n'a pas
+  //   encore activé le scope registrations:read.
+  INTERNAL_NOTIF_DISABLED: process.env.INTERNAL_NOTIF_DISABLED === 'true',
+  // PIPELINE_DISABLED : option nucléaire — le scheduler tick ne traite plus
+  //   aucun lead. Le webhook continue à encaisser (rien n'est perdu), mais
+  //   ni mail prospect ni notif interne ni WhatsApp ne partent.
+  PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
   PORT:                  process.env.PORT || 3000,
 };
 
@@ -319,6 +330,10 @@ function buildAdleadLeadUrl(programId, leadId) {
 }
 
 async function sendInternalNotif({ programId, leadId, contactName, contactEmail, programName }) {
+  if (CONFIG.INTERNAL_NOTIF_DISABLED) {
+    console.log(`[internal-notif] DÉSACTIVÉ via INTERNAL_NOTIF_DISABLED — skip lead ${leadId}`);
+    return;
+  }
   const to = CONFIG.INTERNAL_NOTIF_EMAIL;
   const when = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
   const adleadUrl = buildAdleadLeadUrl(programId, leadId);
@@ -345,6 +360,10 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
 // Objectif : Norman va traiter manuellement — soit constater la dénonciation et
 // laisser tomber, soit envoyer lui-même la relance si le lead est sain.
 async function sendFailClosedNotif({ programId, leadId, contactName, contactEmail, programName, reason, receivedAt }) {
+  if (CONFIG.INTERNAL_NOTIF_DISABLED) {
+    console.log(`[fail-closed-notif] DÉSACTIVÉ via INTERNAL_NOTIF_DISABLED — skip lead ${leadId}`);
+    return;
+  }
   const to = CONFIG.INTERNAL_NOTIF_EMAIL;
   const when = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
   const adleadUrl = buildAdleadLeadUrl(programId, leadId);
@@ -772,6 +791,14 @@ let schedulerRunning = false;
 
 async function schedulerTick() {
   if (schedulerRunning) return;
+  // Kill switch global : PIPELINE_DISABLED=true → aucun traitement, les leads
+  // restent dans la file d'attente sans être consommés. Le webhook continue à
+  // encaisser de nouveaux leads normalement.
+  if (CONFIG.PIPELINE_DISABLED) {
+    // Log une fois par tick mais pas à chaque lead pour ne pas polluer
+    console.log(`[scheduler] PIPELINE_DISABLED=true → tick ignoré (${pendingLeads.length} lead(s) en attente)`);
+    return;
+  }
   schedulerRunning = true;
   try {
     const now = Date.now();
