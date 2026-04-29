@@ -1241,6 +1241,73 @@ app.get('/api/pending', (req, res) => {
   res.json(pendingLeads.slice().reverse());
 });
 
+// ─── ADMIN : vider la file pending ─────────────────────────────────────────
+// Endpoint d'urgence pour purger les leads "pending" sans redémarrer le service.
+// Utilisé p.ex. avant de réactiver le pipeline après une pause prolongée, pour
+// éviter de traiter en rafale 75+ leads obsolètes (les vrais éligibles seront
+// renvoyés par Adlead au prochain webhook ou refetch côté CRM).
+//
+// Auth : token partagé via le secret webhook Adlead (ADLEAD_WEBHOOK_SECRET).
+// Pas d'env var supplémentaire à provisionner — on réutilise un secret déjà
+// présent en prod. Comparaison timing-safe pour éviter les attaques par timing.
+//
+// Effet :
+//   - retire toutes les entrées de pendingLeads
+//   - les enregistre dans processedLeads avec status='cancelled' et reason
+//     'admin clear-pending' pour garder une trace dans le dashboard
+//   - persiste les deux fichiers (pending_leads.json, processed_leads.json)
+//
+// Usage :
+//   curl -X POST "https://<host>/api/admin/clear-pending?token=<ADLEAD_WEBHOOK_SECRET>"
+app.post('/api/admin/clear-pending', (req, res) => {
+  const expected = CONFIG.ADLEAD_WEBHOOK_SECRET;
+  if (!expected) {
+    return res.status(503).json({ error: 'ADLEAD_WEBHOOK_SECRET non configuré côté serveur — endpoint désactivé' });
+  }
+  const provided = String(req.query.token || req.body?.token || '');
+  // Comparaison timing-safe (longueurs alignées) — refuse aussi les tokens vides.
+  let ok = false;
+  try {
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    ok = provided.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch { ok = false; }
+  if (!ok) {
+    return res.status(401).json({ error: 'token invalide' });
+  }
+
+  const before = pendingLeads.length;
+  const now = new Date().toISOString();
+  const cleared = pendingLeads.map(entry => ({
+    id: entry.interestId || entry.id,
+    leadId: entry.leadId,
+    interestId: entry.interestId,
+    programId: entry.programId,
+    programName: entry.programName,
+    email: entry.email,
+    status: 'cancelled',
+    reason: 'admin clear-pending (purge file avant redémarrage)',
+    createdAt: entry.receivedAt || entry.createdAt || now,
+    processedAt: now,
+  }));
+  // Trace dans processedLeads pour que le dashboard reflète la purge.
+  processedLeads.push(...cleared);
+  saveProcessed();
+  // Vide la file et persiste.
+  pendingLeads = [];
+  savePending();
+
+  console.log(`[admin] clear-pending : ${before} lead(s) purgés (status=cancelled, reason=admin clear-pending)`);
+  res.json({
+    cleared: before,
+    remaining: pendingLeads.length,
+    timestamp: now,
+    note: 'Les leads ont été archivés dans processedLeads avec status=cancelled. ' +
+          'Si Adlead repousse les mêmes leads via webhook ou si un refetch est lancé, ils seront ré-enqueue.',
+    leadIds: cleared.map(l => l.leadId).filter(Boolean),
+  });
+});
+
 // Stats agrégées pour le dashboard temps réel
 app.get('/api/stats', (req, res) => {
   const now = Date.now();
