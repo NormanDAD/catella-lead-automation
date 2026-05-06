@@ -38,6 +38,21 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  // ── Tag Adlead "Relance J+1 envoyée" ─────────────────────────────────────
+  // L'API Adlead /tags exige un UUID de tag pré-créé dans l'admin (côté
+  // responsable marketing). Doc : https://docs.adlead.immo/v1/tags.html
+  // Si TAG_UUID_RELANCE_J1 vide → on skippe silencieusement la pose du tag.
+  // Pour activer : créer un tag "Relance J+1 envoyée" dans Adlead, copier l'UUID,
+  //                le coller dans cette env var Railway.
+  TAG_UUID_RELANCE_J1: process.env.TAG_UUID_RELANCE_J1 || '',
+  // ── Mise à jour statut lead Adlead "pending" (en attente de contact) ──────
+  // Doc Adlead n'expose PAS encore d'endpoint PATCH/PUT pour modifier le statut
+  // d'un lead (Cédric, 22/04/2026 : "Cette route n'existe pas encore mais sera
+  // disponible d'ici cet été"). On tente quand même un PATCH best-effort sur
+  // /leads/{id} → si l'API n'expose pas, on récupère 404/405 et on log.
+  // STATUS_UPDATE_ENABLED=false pour désactiver complètement les tentatives
+  // (limiter les logs d'erreur tant que la route n'existe pas).
+  STATUS_UPDATE_ENABLED: process.env.STATUS_UPDATE_ENABLED !== 'false',
   // ── Reply handler (Graph device-code + Claude) ───────────────────────────
   // ANTHROPIC_API_KEY        : clé API pour l'appel Claude Sonnet
   // ANTHROPIC_MODEL          : id modèle (default claude-sonnet-4-6)
@@ -47,14 +62,14 @@ const CONFIG = {
   ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
   REPLY_HANDLER_ENABLED:   process.env.REPLY_HANDLER_ENABLED === 'true',
   REPLY_POLL_INTERVAL_MS:  Number(process.env.REPLY_POLL_INTERVAL_MS || 3 * 60 * 1000),
-  // ── Dénonciation fail-closed ──────────────────────────────────────────────
-  // L'endpoint Adlead GET /programs/{id}/registrations peut répondre 403 si la
-  // clé API n'a pas le scope registrations:read. Dans ce cas on ne peut PAS
-  // savoir si un lead est dénoncé → par défaut on BLOQUE (fail-closed) pour ne
-  // pas envoyer d'email sur un lead revendiqué par un prescripteur.
-  // Mettre SKIP_REGISTRATIONS_CHECK=true pour bypasser ce fail-closed en
-  // urgence (à utiliser en connaissance de cause).
-  SKIP_REGISTRATIONS_CHECK: process.env.SKIP_REGISTRATIONS_CHECK === 'true',
+  // ── Dénonciation : DÉSACTIVÉ par défaut (Cédric Adlead, 22/04/2026) ───────
+  // Adlead filtre désormais les leads dénoncés à la SOURCE : leur webhook ne
+  // nous envoie plus les leads avec une dénonciation active sur le programme.
+  // De plus, la clé API #223 a été restreinte (plus d'accès /registrations).
+  // → Le check côté nous est devenu redondant ET cassé (403 sur l'endpoint).
+  // → Default = bypass complet du check. Pour réactiver malgré tout, passer
+  //   explicitement SKIP_REGISTRATIONS_CHECK=false en env var.
+  SKIP_REGISTRATIONS_CHECK: process.env.SKIP_REGISTRATIONS_CHECK !== 'false',
   // ── Kill switches d'urgence ───────────────────────────────────────────────
   // INTERNAL_NOTIF_DISABLED : si true, on n'envoie AUCUN mail interne à Norman
   //   (ni sendInternalNotif ni sendFailClosedNotif). Les mails aux prospects
@@ -296,11 +311,59 @@ async function adleadPost(path, body) {
   return json.data || json;
 }
 
-// NB: il n'existe PAS d'endpoint documenté dans l'API v1 Adlead pour modifier le statut
-// d'un lead (ni PUT ni PATCH — confirmé par la doc https://docs.adlead.immo/v1/leads.html
-// qui expose uniquement POST pour l'ajout et GET pour la lecture). Le PUT /leads/{id}
-// qu'on essayait avant renvoyait 500 car l'endpoint n'existe simplement pas côté Adlead.
-// Le statut sera posé manuellement par le commercial via l'UI (notif email l'y invite).
+// PATCH best-effort. L'API Adlead v1 n'expose PAS officiellement de route de mise à jour
+// d'un lead (Cédric, 22/04/2026 : "Cette route n'existe pas encore mais sera disponible
+// d'ici cet été"). On tente quand même — si la route n'existe pas, on récupère 404/405,
+// on log silencieusement et on continue. Dès que Cédric livre la route, le code marchera
+// sans modif (STATUS_UPDATE_ENABLED=true par défaut).
+async function adleadPatch(path, body) {
+  const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}${path}`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'X-API-Key': CONFIG.ADLEAD_API_KEY,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Adlead API PATCH ${res.status} ${res.statusText} on ${path}: ${text.slice(0, 200)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return json.data || json;
+}
+
+// Pose un tag (UUID) sur un lead via POST /programs/{pid}/leads/{lid}/tags.
+// Doc : https://docs.adlead.immo/v1/tags.html
+// Le tag doit être pré-créé dans l'admin Adlead (côté responsable marketing) — l'UUID
+// est ensuite injecté en env var TAG_UUID_RELANCE_J1.
+// Si l'UUID n'est pas configuré, on skip silencieusement.
+async function addTagToLead(programId, leadId, tagUuid, isGlobal = false) {
+  if (!tagUuid) {
+    return { skipped: true, reason: 'TAG_UUID non configuré' };
+  }
+  return adleadPost(`/programs/${programId}/leads/${leadId}/tags`, {
+    tag_uuid: tagUuid,
+    is_global: isGlobal,
+  });
+}
+
+// Met à jour le statut d'un lead Adlead.
+// Statuts valides : to-process, pending, to-follow, ongoing, interested, negotiating,
+//                   discarded, pending-purchaser, purchaser
+// (cf https://docs.adlead.immo/v1/leads.html#statut-d-un-lead)
+// Best-effort : la route PATCH n'est pas officiellement documentée. Si elle retourne
+// 404/405 → throw qu'on attrape côté appelant.
+async function updateLeadStatusAdlead(programId, leadId, statusKey) {
+  if (!CONFIG.STATUS_UPDATE_ENABLED) {
+    return { skipped: true, reason: 'STATUS_UPDATE_ENABLED=false' };
+  }
+  return adleadPatch(`/programs/${programId}/leads/${leadId}`, {
+    status: statusKey,
+  });
+}
 
 // Créer une sales-action "Traité - Relance J+1" sur le lead (colonne SUIVI COMMERCIAL Adlead)
 //   Endpoint : POST /programs/{pid}/leads/{lid}/sales-actions
@@ -1116,6 +1179,39 @@ async function processPendingLead(entry) {
       console.log(`[process] (info) sales-action Adlead échec best-effort lead ${entry.leadId}: ${e.message.slice(0, 120)}`);
     }
 
+    // ── Best-effort pose tag Adlead "Relance J+1 envoyée"
+    //    Si TAG_UUID_RELANCE_J1 non configuré → skip silencieux (Norman doit créer le
+    //    tag dans l'admin Adlead et coller l'UUID dans Railway).
+    let tagPosted = false;
+    let tagError = null;
+    if (CONFIG.TAG_UUID_RELANCE_J1) {
+      try {
+        await addTagToLead(entry.programId, entry.leadId, CONFIG.TAG_UUID_RELANCE_J1, false);
+        tagPosted = true;
+        console.log(`[process] ✅ tag Relance J+1 posé sur lead ${entry.leadId}`);
+      } catch (e) {
+        tagError = e.message;
+        console.error(`[process] ⚠️ pose tag échec lead ${entry.leadId}: ${e.message.slice(0, 200)}`);
+      }
+    }
+
+    // ── Best-effort PATCH statut lead → "pending" (= "En attente de contact")
+    //    Cédric : "Cette route n'existe pas encore mais sera disponible d'ici cet été".
+    //    On tente quand même — si 404/405, on log silencieusement, ça marchera dès livraison.
+    let statusUpdated = false;
+    let statusError = null;
+    if (CONFIG.STATUS_UPDATE_ENABLED) {
+      try {
+        await updateLeadStatusAdlead(entry.programId, entry.leadId, 'pending');
+        statusUpdated = true;
+        console.log(`[process] ✅ statut lead ${entry.leadId} → pending`);
+      } catch (e) {
+        statusError = e.message;
+        // Silencieux : la route n'est pas censée exister aujourd'hui (404 attendu).
+        console.log(`[process] (info) PATCH statut échec lead ${entry.leadId}: ${e.message.slice(0, 150)}`);
+      }
+    }
+
     // ── Best-effort WhatsApp via Twilio (non bloquant, gated par WHATSAPP_ENABLED)
     //    Phase 1 = sandbox : destinataire doit avoir joint le sandbox au préalable.
     //    Phase 2 = prod    : templates Meta approuvés requis.
@@ -1171,6 +1267,10 @@ async function processPendingLead(entry) {
       whatsappTo,
       whatsappSid,
       whatsappError,
+      tagPosted,
+      tagError,
+      statusUpdated,
+      statusError,
     });
   } catch (err) {
     console.error(`[process] erreur interest ${entry.interestId}:`, err.message);
