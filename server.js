@@ -972,6 +972,51 @@ async function processPendingLead(entry) {
       });
     }
 
+    // ── CHECK ROBUSTE DÉNONCIATION/STATUT — fail-closed côté lead ────────────
+    // S'applique TOUJOURS (même si entry.force=true) car c'est une règle métier
+    // critique : on ne doit JAMAIS envoyer une relance auto sur un lead :
+    //   (1) marqué is_under_prescription=true → revendiqué par un prescripteur
+    //       (= dénonciation activée côté Adlead, indépendamment de /registrations)
+    //   (2) avec un status ≠ "to-process" → un commercial l'a déjà fait avancer
+    //       (statuts Adlead : pending, to-follow, ongoing, interested, negotiating,
+    //        discarded, pending-purchaser, purchaser → tous bloquants)
+    //   (3) avec un discard_reason non null → mis hors-jeu pour une raison quelconque
+    //
+    // Ce check repose UNIQUEMENT sur les champs renvoyés par GET /leads/{id}
+    // (que la clé API actuelle peut consulter, on l'a vérifié), donc il est
+    // robuste face au scope retiré sur /registrations. Cf. doc Adlead :
+    // https://docs.adlead.immo/v1/leads.html#statut-d-un-lead
+    let leadBlocked = false;
+    let blockReason = '';
+    let blockStatusKey = 'cancelled';
+    if (lead.is_under_prescription === true) {
+      leadBlocked = true;
+      blockReason = 'Lead sous prescription (is_under_prescription=true)';
+      blockStatusKey = 'denounced';
+    } else if (lead.status && lead.status !== 'to-process') {
+      leadBlocked = true;
+      blockReason = `Lead statut Adlead = "${lead.status}" (≠ to-process, voir doc Adlead statuts)`;
+      blockStatusKey = lead.status === 'discarded' ? 'cancelled' : 'cancelled';
+    } else if (lead.discard_reason) {
+      leadBlocked = true;
+      blockReason = `Lead discardé (discard_reason=${lead.discard_reason})`;
+    }
+    if (leadBlocked) {
+      console.log(`[process] lead ${entry.leadId} BLOQUÉ par check robuste : ${blockReason} → on n'envoie pas (status=${blockStatusKey})`);
+      return finalize({
+        id: entry.interestId,
+        status: blockStatusKey,
+        reason: blockReason,
+        contactName: lead.contacts?.[0]?.fullname || '',
+        email: lead.contacts?.[0]?.email_primary || '',
+        programId: entry.programId,
+        programName: interest.program?.name || '',
+        leadStatus: lead.status || null,
+        isUnderPrescription: lead.is_under_prescription === true,
+        discardReason: lead.discard_reason || null,
+      });
+    }
+
     const contact = (lead.contacts || [])[0];
     if (!contact) {
       return finalize({ id: entry.interestId, status: 'skipped', error: 'Aucun contact sur le lead' });
