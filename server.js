@@ -464,8 +464,26 @@ async function sendFailClosedNotif({ programId, leadId, contactName, contactEmai
   return sendEmailViaPowerAutomate(to, subject, html);
 }
 
-async function fetchLead(leadId) {
-  // Try with includes for interests so we can read status from there
+async function fetchLead(leadId, { programId } = {}) {
+  // PRIORITÉ : endpoint contextualisé /programs/{pid}/leads/{lid} qui renvoie
+  // le lead COMPLET (avec status, is_under_prescription, discard_reason — clés
+  // métier critiques pour le check robuste dénonciation/statut).
+  // L'endpoint global /leads/{id} (sans programId) avec la clé API restreinte
+  // par Cédric (22/04/2026) renvoie un lead partiel sans ces champs → check
+  // dénonciation aveugle. Cf. INCIDENT-2026-05-06.md.
+  if (programId) {
+    try {
+      return await adleadGet(`/programs/${programId}/leads/${leadId}?include=interests,interests.program,contacts`);
+    } catch (e) {
+      try {
+        return await adleadGet(`/programs/${programId}/leads/${leadId}`);
+      } catch (e2) {
+        // Fallback final sur l'endpoint global (peut être partiel)
+        return adleadGet(`/leads/${leadId}`);
+      }
+    }
+  }
+  // Pas de programId connu : on tente l'endpoint global avec includes, fallback nu.
   try {
     return await adleadGet(`/leads/${leadId}?include=interests,interests.program,contacts`);
   } catch (e) {
@@ -898,8 +916,10 @@ async function processPendingLead(entry) {
   savePending();
 
   try {
-    // 1. Récupérer le lead (avec include=interests si supporté) — sert pour les contacts et potentiellement pour lire l'interest embarqué
-    const lead = await fetchLead(entry.leadId);
+    // 1. Récupérer le lead via l'endpoint CONTEXTUALISÉ /programs/{pid}/leads/{lid}
+    //    qui renvoie le lead COMPLET (status, is_under_prescription, discard_reason).
+    //    Indispensable pour le check robuste dénonciation/statut plus bas.
+    const lead = await fetchLead(entry.leadId, { programId: entry.programId });
     console.log(`[debug] lead ${entry.leadId} — keys: ${Object.keys(lead || {}).join(',')}`);
     // Essaie plusieurs variantes de nommage pour le sous-champ interests
     const maybeInterestsArr = lead?.interests || lead?.interest || lead?.program_interests || lead?.programs || null;
