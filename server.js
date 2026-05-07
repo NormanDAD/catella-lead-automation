@@ -62,6 +62,12 @@ const CONFIG = {
   ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
   REPLY_HANDLER_ENABLED:   process.env.REPLY_HANDLER_ENABLED === 'true',
   REPLY_POLL_INTERVAL_MS:  Number(process.env.REPLY_POLL_INTERVAL_MS || 3 * 60 * 1000),
+  // ── Webhook Power Automate "Reply Watcher" ───────────────────────────────
+  // Reçoit les réponses prospect via un flow PA "Lorsqu'un nouveau message arrive".
+  // Permet de bypasser la policy Conditional Access Catella (qui bloque l'auth
+  // Graph directe car notre IP serveur n'est pas un device Catella enregistré).
+  // Le flow PA POSTe vers /webhook/inbox-reply avec le header X-PA-Secret.
+  POWER_AUTOMATE_INBOX_SECRET: process.env.POWER_AUTOMATE_INBOX_SECRET || '',
   // ── Dénonciation : DÉSACTIVÉ par défaut (Cédric Adlead, 22/04/2026) ───────
   // Adlead filtre désormais les leads dénoncés à la SOURCE : leur webhook ne
   // nous envoie plus les leads avec une dénonciation active sur le programme.
@@ -2119,6 +2125,171 @@ app.post('/webhook/adlead', (req, res) => {
   } catch (err) {
     console.error('[webhook] Erreur enqueue:', err.message);
   }
+});
+
+// ─── REPLY WATCHER — WEBHOOK POWER AUTOMATE ────────────────────────────────
+// Reçoit les réponses prospect détectées par un flow Power Automate
+// "Lorsqu'un nouveau message arrive (V3)". Permet de contourner la policy
+// Conditional Access Catella qui bloque l'auth Graph directe depuis notre
+// serveur Railway (IP non-Catella, état device "Unregistered" → AADSTS53003).
+//
+// Schéma payload attendu (à configurer dans le flow PA) :
+// {
+//   "from": "client@email.com",
+//   "fromName": "Jean Dupont",
+//   "subject": "Re: ...",
+//   "body": "Contenu du mail (texte ou HTML)",
+//   "bodyContentType": "text" | "html",
+//   "conversationId": "...",
+//   "messageId": "...",
+//   "receivedAt": "2026-05-07T10:00:00Z"
+// }
+//
+// Header obligatoire : X-PA-Secret (= POWER_AUTOMATE_INBOX_SECRET côté Railway)
+//
+// Flow côté serveur :
+//   1. Vérifie le secret partagé
+//   2. matchReplyToRelance() → retrouve la relance trackée
+//   3. classifyReply() → catégorie via Claude Haiku (rdv / info / refus / etc.)
+//   4. draftResponse() → brouillon HTML de réponse via Claude Haiku
+//   5. Envoie le brouillon à Norman par email (INTERNAL_NOTIF_EMAIL = Gmail perso)
+//      → Norman copie-colle dans Outlook pour répondre
+//   6. createAdleadReplySalesAction() → action commerciale "Réponse reçue" sur le lead
+app.post('/webhook/inbox-reply', async (req, res) => {
+  // 1. Auth
+  const expected = CONFIG.POWER_AUTOMATE_INBOX_SECRET;
+  if (!expected) {
+    return res.status(503).json({ error: 'POWER_AUTOMATE_INBOX_SECRET non configuré côté serveur' });
+  }
+  const provided = req.headers['x-pa-secret'] || req.query.secret || '';
+  if (provided !== expected) {
+    console.warn('[webhook/inbox-reply] secret invalide');
+    return res.status(401).json({ error: 'Secret invalide' });
+  }
+
+  const p = req.body || {};
+  const fromAddr = String(p.from || '').toLowerCase().trim();
+  const subject = String(p.subject || '').trim();
+  const bodyContent = String(p.body || '').trim();
+  const bodyContentType = String(p.bodyContentType || 'text').toLowerCase();
+  const conversationId = p.conversationId || null;
+  const messageId = p.messageId || null;
+  const receivedAt = p.receivedAt || new Date().toISOString();
+  const fromName = p.fromName || '';
+
+  if (!fromAddr || (!subject && !bodyContent)) {
+    return res.status(400).json({ error: 'Champs from + (subject ou body) requis' });
+  }
+
+  // ACK rapide (Power Automate a un timeout court)
+  res.status(200).json({ message: 'Reçu, traitement en arrière-plan' });
+
+  // 2. Construit un objet "msg" au format Graph attendu par inboxWatcher
+  const msg = {
+    id: messageId,
+    subject,
+    body: { contentType: bodyContentType === 'html' ? 'html' : 'text', content: bodyContent },
+    from: { emailAddress: { address: fromAddr, name: fromName } },
+    receivedDateTime: receivedAt,
+    conversationId,
+  };
+
+  // 3. Traitement asynchrone (best-effort, ne bloque pas la réponse)
+  setImmediate(async () => {
+    try {
+      // Match avec une relance trackée
+      const match = inboxWatcher.matchReplyToRelance(msg);
+      const relance = match?.relance || null;
+      const strategy = match?.strategy || null;
+
+      if (!relance) {
+        console.log(`[webhook/inbox-reply] aucune relance trackée pour ${fromAddr} (subject: "${subject.slice(0, 60)}") — on ignore`);
+        return;
+      }
+      console.log(`[webhook/inbox-reply] match ${strategy} → relance lead ${relance.leadId} / ${relance.programName}`);
+
+      // Classification + brouillon de réponse via Claude Haiku
+      const leadCtx = {
+        leadId: relance.leadId,
+        programId: relance.programId,
+        contactEmail: relance.contactEmail,
+        contactName: relance.contactName,
+        programName: relance.programName,
+        salutation: relance.contactName || 'Madame, Monsieur',
+      };
+      const programCtx = { name: relance.programName };
+      const bodyText = inboxWatcher.extractBodyText(msg);
+
+      let classification, draftHtml;
+      try {
+        classification = await inboxWatcher.classifyReply({
+          subject, body: bodyText, leadContext: leadCtx, programContext: programCtx,
+        });
+      } catch (e) {
+        console.error(`[webhook/inbox-reply] classifyReply échec: ${e.message}`);
+        classification = { category: 'autre', confidence: 'low', reasoning: `classify error: ${e.message}` };
+      }
+      try {
+        const draft = await inboxWatcher.draftResponse({
+          category: classification.category,
+          classification,
+          replyBody: bodyText,
+          replySubject: subject,
+          leadContext: leadCtx,
+          programContext: programCtx,
+        });
+        draftHtml = inboxWatcher.wrapWithSignature(draft?.htmlBody || draft?.body || '');
+      } catch (e) {
+        console.error(`[webhook/inbox-reply] draftResponse échec: ${e.message}`);
+        draftHtml = `<p>(brouillon non disponible : ${e.message})</p>`;
+      }
+
+      // 4. Notif Norman avec le brouillon prêt à copier-coller dans Outlook
+      const adleadUrl = buildAdleadLeadUrl(relance.programId, relance.leadId);
+      const notifSubject = `📥 Réponse client — ${relance.programName || 'Programme'} — ${relance.contactName || fromAddr} (${classification.category})`;
+      const notifHtml = `
+<!doctype html><html lang="fr"><body style="font-family: Arial, sans-serif; font-size: 14px; color: #222; line-height: 1.55;">
+<p>Bonjour Norman,</p>
+<p>Le prospect <strong>${relance.contactName || fromAddr}</strong> a répondu à ta relance auto sur <strong>${relance.programName || 'le programme'}</strong>.</p>
+<ul style="list-style: none; padding-left: 0;">
+  <li>• <strong>Catégorie</strong> : ${classification.category} ${classification.confidence ? `(confiance ${classification.confidence})` : ''}</li>
+  <li>• <strong>Raisonnement IA</strong> : ${classification.reasoning || '—'}</li>
+  <li>• <strong>Lien Adlead</strong> : <a href="${adleadUrl}">${adleadUrl}</a></li>
+</ul>
+<h3 style="margin-top: 24px;">Le mail du client :</h3>
+<blockquote style="border-left: 3px solid #ccc; padding-left: 12px; color: #555;">
+  ${(bodyText || '(corps vide)').replace(/\n/g, '<br>')}
+</blockquote>
+<h3 style="margin-top: 24px;">Brouillon de réponse (à copier-coller dans Outlook) :</h3>
+<div style="border: 1px solid #ddd; padding: 16px; border-radius: 8px; background: #fafafa;">
+  ${draftHtml}
+</div>
+<p style="color: #888; font-size: 12px; margin-top: 24px;">— Reply Watcher Catella · Power Automate trigger</p>
+</body></html>`;
+
+      try {
+        await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, notifSubject, notifHtml);
+        console.log(`[webhook/inbox-reply] ✅ notif brouillon envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL}`);
+      } catch (e) {
+        console.error(`[webhook/inbox-reply] ⚠️ notif Norman échec: ${e.message}`);
+      }
+
+      // 5. Sales-action Adlead "Réponse reçue"
+      try {
+        await inboxWatcher.createAdleadReplySalesAction({
+          programId: relance.programId,
+          leadId: relance.leadId,
+          category: classification.category,
+          reasoning: classification.reasoning || '',
+        });
+        console.log(`[webhook/inbox-reply] ✅ sales-action Adlead créée sur lead ${relance.leadId}`);
+      } catch (e) {
+        console.error(`[webhook/inbox-reply] ⚠️ sales-action Adlead échec: ${e.message}`);
+      }
+    } catch (err) {
+      console.error('[webhook/inbox-reply] erreur traitement:', err.message);
+    }
+  });
 });
 
 // ─── START ──────────────────────────────────────────────────────────────────
