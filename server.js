@@ -57,6 +57,32 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  // ContentSid Twilio du template Meta "relance_j1_catella" (ex: HX1e7f...).
+  // Si vide → envoi en mode Body (sandbox / hors templates) avec wording legacy
+  //   buildWhatsAppMessage(). Marche uniquement pour numéros opted-in au sandbox.
+  // Si défini → envoi en mode ContentSid+ContentVariables (templates Meta-approved).
+  //   Variables : {{1}} = prénom, {{2}} = nom du programme.
+  // À renseigner sur Railway dès que le template passe "Approved" côté Meta.
+  TWILIO_TEMPLATE_RELANCE_J1: process.env.TWILIO_TEMPLATE_RELANCE_J1 || '',
+  // Webhook Twilio "incoming WhatsApp" : Twilio nous POSTe à /webhook/whatsapp-incoming
+  // dès qu'un prospect répond sur notre numéro WhatsApp Business. On le secure par
+  // signature Twilio HMAC (X-Twilio-Signature) — pas d'env var requis (le secret est
+  // l'AUTH_TOKEN Twilio déjà configuré). TWILIO_VALIDATE_SIGNATURE=false pour bypass
+  // en dev/debug uniquement.
+  TWILIO_VALIDATE_SIGNATURE: process.env.TWILIO_VALIDATE_SIGNATURE !== 'false',
+  // ── Notifications Telegram (canal "urgent" Norman) ─────────────────────────
+  // Bot créé via @BotFather → @Catella_notif_bot. Token = TELEGRAM_BOT_TOKEN.
+  // Norman a démarré la conversation avec /start → son chat_id = TELEGRAM_CHAT_ID.
+  // Le bot poste des notifs courtes (HTML) à 2 occasions :
+  //   - Lead traité par le pipeline (sendInternalNotif) → "lead sent → action Adlead urgente"
+  //   - Réponse WhatsApp prospect (/webhook/whatsapp-incoming) → "réponse → action Adlead"
+  // Canal redondant avec mail Gmail + WhatsApp Twilio interne. But : ne JAMAIS rater une
+  // notif urgente, et garder une trace dans l'historique conversationnel Telegram.
+  // TELEGRAM_NOTIF_ENABLED=false pour kill switch global (idem que INTERNAL_NOTIF_DISABLED
+  // mais ciblé Telegram seulement, utile si on veut bypass Telegram tout en gardant mail).
+  TELEGRAM_BOT_TOKEN:      process.env.TELEGRAM_BOT_TOKEN || '',
+  TELEGRAM_CHAT_ID:        process.env.TELEGRAM_CHAT_ID || '',
+  TELEGRAM_NOTIF_ENABLED:  process.env.TELEGRAM_NOTIF_ENABLED !== 'false',
   // ── Tag Adlead "Relance J+1 envoyée" ─────────────────────────────────────
   // L'API Adlead /tags exige un UUID de tag pré-créé dans l'admin (côté
   // responsable marketing). Doc : https://docs.adlead.immo/v1/tags.html
@@ -470,6 +496,23 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   } else if (!CONFIG.INTERNAL_NOTIF_PHONE) {
     console.log(`[internal-notif] (info) INTERNAL_NOTIF_PHONE non configuré → pas de WhatsApp ping. Lead ${leadId}.`);
   }
+  // 3. Notif Telegram à Norman (canal urgent supplémentaire, indispensable à terme
+  //    quand le WhatsApp interne ne marchera plus en prod Meta sans template approuvé).
+  if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+    try {
+      const txt =
+        `🚨 <b>Lead traité auto — ACTION ADLEAD URGENTE</b>\n\n` +
+        `• <b>Programme</b> : ${escapeTelegramHtml(programName || 'inconnu')}\n` +
+        `• <b>Contact</b> : ${escapeTelegramHtml(contactName || contactEmail || 'inconnu')}\n` +
+        `• <b>Email</b> : <code>${escapeTelegramHtml(contactEmail || 'n/a')}</code>\n\n` +
+        `→ <a href="${adleadUrl}">Ouvrir dans Adlead</a>\n\n` +
+        `<i>Pose une action Adlead avant qu'un autre vendeur ne te vole le lead.</i>`;
+      const resp = await sendTelegramNotification(txt);
+      console.log(`[internal-notif] ✅ Telegram envoyé (message_id: ${resp?.result?.message_id || 'n/a'}) — lead ${leadId}`);
+    } catch (e) {
+      console.error(`[internal-notif] ⚠️ Telegram échec lead ${leadId}: ${e.message}`);
+    }
+  }
 }
 
 // Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
@@ -841,7 +884,30 @@ function normalizePhoneE164(raw, defaultCountryCode = '33') {
   return '+' + digits;
 }
 
-async function sendWhatsAppViaTwilio(toE164, body) {
+/**
+ * Envoie un message WhatsApp via l'API Twilio.
+ *
+ * Deux modes :
+ *  - Mode "Body" (legacy / sandbox / notifs internes) : on passe `body` en texte
+ *    libre. Twilio l'envoie tel quel. Marche pour les destinataires sandbox-joined,
+ *    et pour les conversations DÉJÀ ouvertes (session 24h après dernier message
+ *    du prospect). Ne marche PAS en cold-outreach sur numéro Meta-approved : Meta
+ *    rejette tout message hors-template envoyé en initiation de conversation.
+ *  - Mode "ContentSid" (prod Meta) : on passe `options.templateSid` + `options.contentVariables`.
+ *    Twilio résout le template approuvé Meta (id HX...) et substitue les variables.
+ *    C'est le SEUL mode autorisé pour ouvrir une conversation en prod Meta.
+ *
+ * Backward-compatible : tous les appels actuels `sendWhatsAppViaTwilio(phone, body)`
+ * continuent de fonctionner en mode Body (sans options).
+ *
+ * @param {string} toE164 — Numéro destinataire au format E164 (+33...)
+ * @param {string} body — Texte à envoyer en mode Body. Ignoré si options.templateSid présent.
+ * @param {object} [options] — Options avancées
+ * @param {string} [options.templateSid] — ContentSid Twilio (ex: HX1e7f...) → bascule en mode template
+ * @param {object} [options.contentVariables] — Mapping {"1": "Jean", "2": "Programme XYZ"}
+ * @returns {Promise<object>} — Réponse Twilio JSON (contient .sid)
+ */
+async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
   if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN || !CONFIG.TWILIO_WHATSAPP_FROM) {
     throw new Error('Credentials Twilio non configurés');
   }
@@ -850,7 +916,16 @@ async function sendWhatsAppViaTwilio(toE164, body) {
   const params = new URLSearchParams();
   params.append('From', CONFIG.TWILIO_WHATSAPP_FROM);
   params.append('To',   `whatsapp:${toE164}`);
-  params.append('Body', body);
+  if (options.templateSid) {
+    // Mode ContentSid : Body est ignoré côté Twilio quand ContentSid est présent.
+    params.append('ContentSid', options.templateSid);
+    if (options.contentVariables) {
+      params.append('ContentVariables', JSON.stringify(options.contentVariables));
+    }
+  } else {
+    // Mode Body legacy (sandbox / notifs internes).
+    params.append('Body', body);
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -864,6 +939,55 @@ async function sendWhatsAppViaTwilio(toE164, body) {
     throw new Error(`Twilio ${res.status}: ${err.slice(0, 200)}`);
   }
   return await res.json();
+}
+
+/**
+ * Envoie une notification Telegram à Norman via le bot @Catella_notif_bot.
+ * Best-effort : ne bloque pas le caller si Telegram est down ou mal configuré.
+ *
+ * Format : par défaut parse_mode=HTML pour permettre <b>, <i>, <a>, <code> dans le text.
+ * Notif sonore par défaut (disable_notification=false). Pour notif silencieuse,
+ * passer { silent: true }.
+ *
+ * @param {string} text — Texte du message (max 4096 chars Telegram).
+ * @param {object} [options]
+ * @param {string} [options.parseMode] — 'HTML' (défaut) | 'MarkdownV2' | 'Markdown'
+ * @param {boolean} [options.silent] — true → notif silencieuse (no sound on phone)
+ * @returns {Promise<object|null>} — Réponse Telegram API (null si désactivé)
+ */
+async function sendTelegramNotification(text, options = {}) {
+  if (!CONFIG.TELEGRAM_NOTIF_ENABLED) return null;
+  if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
+    throw new Error('Telegram non configuré (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant)');
+  }
+  const url = `https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: CONFIG.TELEGRAM_CHAT_ID,
+    text: text.slice(0, 4096), // hard cap Telegram
+    parse_mode: options.parseMode || 'HTML',
+    disable_web_page_preview: options.disableWebPagePreview !== false,
+    disable_notification: options.silent === true,
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Telegram ${res.status}: ${err.slice(0, 200)}`);
+  }
+  return await res.json();
+}
+
+// Helper : escape HTML pour passer dans Telegram en parse_mode HTML.
+// Telegram HTML accepte seulement <b>, <i>, <u>, <s>, <a>, <code>, <pre>, <tg-spoiler>,
+// <blockquote>. Toutes les autres balises doivent être escapées.
+function escapeTelegramHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function buildWhatsAppMessage(ctx) {
@@ -1374,15 +1498,28 @@ async function processPendingLead(entry) {
       } else {
         whatsappTo = phoneE164;
         try {
+          // Mode prod Meta (ContentSid) si template configuré ; sinon fallback body (sandbox).
+          // Le template "relance_j1_catella" attend : {{1}} = prénom, {{2}} = nom du programme.
+          // Le body legacy buildWhatsAppMessage reste construit (utilisé en fallback Twilio
+          // si le template est absent côté Railway, et utile pour debug/logging).
+          const firstname = splitName(contact.fullname || '').firstname || '';
           const body = buildWhatsAppMessage({
             fullname: contact.fullname || '',
             programme: programName,
             ville,
             lien_rdv: CONFIG.BOOKING_URL,
           });
-          const resp = await sendWhatsAppViaTwilio(phoneE164, body);
+          const sendOptions = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? {
+            templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
+            contentVariables: {
+              "1": firstname || 'bonjour',  // fallback si pas de prénom (rare mais possible)
+              "2": programName || 'votre projet',
+            },
+          } : {};
+          const resp = await sendWhatsAppViaTwilio(phoneE164, body, sendOptions);
           whatsappSid = resp && resp.sid ? resp.sid : null;
-          console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (sid: ${whatsappSid})`);
+          const mode = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? 'template' : 'body';
+          console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (mode: ${mode}, sid: ${whatsappSid})`);
         } catch (e) {
           whatsappError = e.message;
           console.error(`[process] ⚠️ WhatsApp échec ${phoneE164} lead ${entry.leadId}: ${e.message}`);
@@ -1735,6 +1872,31 @@ app.get('/api/stats', (req, res) => {
 app.post('/api/scheduler/run', async (req, res) => {
   await schedulerTick();
   res.json({ triggered: true, pending: pendingLeads.length });
+});
+
+// Endpoint de test Telegram : envoie un message bidon pour valider le canal.
+// Usage : POST /api/test/telegram (body JSON optionnel : { text: "..." })
+// Réponse : { ok, telegram: <api response> } ou { ok: false, error: ... }.
+app.post('/api/test/telegram', async (req, res) => {
+  const text = (req.body && req.body.text) || `🧪 <b>Test Telegram</b> depuis lead-automation Railway\n\nSi tu vois ce message, le canal Telegram est OK.\n\n<i>Heure serveur : ${new Date().toISOString()}</i>`;
+  try {
+    const resp = await sendTelegramNotification(text);
+    res.json({
+      ok: true,
+      enabled: CONFIG.TELEGRAM_NOTIF_ENABLED,
+      hasToken: !!CONFIG.TELEGRAM_BOT_TOKEN,
+      hasChatId: !!CONFIG.TELEGRAM_CHAT_ID,
+      telegram: resp,
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      enabled: CONFIG.TELEGRAM_NOTIF_ENABLED,
+      hasToken: !!CONFIG.TELEGRAM_BOT_TOKEN,
+      hasChatId: !!CONFIG.TELEGRAM_CHAT_ID,
+      error: e.message,
+    });
+  }
 });
 
 // Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
@@ -2363,6 +2525,209 @@ app.post('/webhook/inbox-reply', async (req, res) => {
       }
     } catch (err) {
       console.error('[webhook/inbox-reply] erreur traitement:', err.message);
+    }
+  });
+});
+
+// ─── HELPER : validation signature Twilio ───────────────────────────────────
+// Doc : https://www.twilio.com/docs/usage/webhooks/webhooks-security
+// Signature = base64(HMAC-SHA1(authToken, fullUrl + sorted(key+value...)))
+// fullUrl doit être l'URL EXACTE configurée côté Twilio (scheme + host + path + query).
+// Sur Railway le serveur est derrière un reverse-proxy → utiliser x-forwarded-* pour
+// reconstruire l'URL telle que vue par Twilio.
+function validateTwilioSignature(req, fullUrl) {
+  const signature = req.headers['x-twilio-signature'] || '';
+  if (!signature) return false;
+  if (!CONFIG.TWILIO_AUTH_TOKEN) return false;
+  const params = req.body || {};
+  const keys = Object.keys(params).sort();
+  let data = fullUrl;
+  for (const k of keys) data += k + (params[k] == null ? '' : String(params[k]));
+  const expected = crypto.createHmac('sha1', CONFIG.TWILIO_AUTH_TOKEN)
+                          .update(Buffer.from(data, 'utf-8'))
+                          .digest('base64');
+  if (signature.length !== expected.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+// ─── WEBHOOK : Twilio "WhatsApp incoming" (réponses prospect) ───────────────
+// Configuré côté Twilio : WhatsApp Senders > +13853324609 > Edit > "Webhook URL for
+// incoming messages" → https://lead-automation-production-33e8.up.railway.app/webhook/whatsapp-incoming
+// Méthode : HTTP POST. Twilio envoie form-urlencoded (From, To, Body, ProfileName, MessageSid…).
+// Sécurité : signature HMAC SHA1 validée via x-twilio-signature (TWILIO_VALIDATE_SIGNATURE=false
+// pour bypass en dev/debug seulement).
+app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), async (req, res) => {
+  // 1. Validation signature Twilio
+  const proto   = req.headers['x-forwarded-proto'] || 'https';
+  const host    = req.headers['x-forwarded-host'] || req.headers.host;
+  const fullUrl = `${proto}://${host}${req.originalUrl}`;
+  if (CONFIG.TWILIO_VALIDATE_SIGNATURE) {
+    if (!validateTwilioSignature(req, fullUrl)) {
+      console.warn(`[webhook/whatsapp-incoming] signature Twilio invalide (url=${fullUrl}) — refusé`);
+      return res.status(403).type('text/xml').send('<Response/>');
+    }
+  } else {
+    console.warn('[webhook/whatsapp-incoming] (info) validation signature désactivée — debug uniquement');
+  }
+
+  // 2. ACK immédiat (twiml vide = pas de réponse auto au prospect)
+  res.status(200).type('text/xml').send('<Response/>');
+
+  // 3. Extract des champs Twilio (form-urlencoded)
+  const p           = req.body || {};
+  const fromRaw     = String(p.From || '');           // "whatsapp:+33612345678"
+  const toRaw       = String(p.To   || '');           // "whatsapp:+13853324609"
+  const body        = String(p.Body || '').trim();
+  const msgSid      = p.MessageSid || p.SmsMessageSid || null;
+  const profileName = p.ProfileName || '';
+  const fromE164    = fromRaw.replace(/^whatsapp:/, '').trim();
+
+  if (!fromE164 || !body) {
+    console.log('[webhook/whatsapp-incoming] payload incomplet — ignoré', { fromE164, hasBody: !!body, msgSid });
+    return;
+  }
+  console.log(`[webhook/whatsapp-incoming] reçu de ${fromE164} (profile: "${profileName}", sid: ${msgSid}): "${body.slice(0, 100)}"`);
+
+  // 4. Traitement asynchrone non bloquant (best-effort)
+  setImmediate(async () => {
+    try {
+      // Match : cherche le lead "sent" le plus récent avec whatsappTo == fromE164.
+      // Normalise les 2 côtés (E164 strict, virer espaces/non-digits) pour matcher
+      // même si l'enregistrement contient des variantes de formatage.
+      const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
+      const fromNorm = normalizeForMatch(fromE164);
+      let match = null;
+      for (let i = processedLeads.length - 1; i >= 0; i--) {
+        const l = processedLeads[i];
+        if (l.status !== 'sent') continue;
+        if (!l.whatsappTo) continue;
+        if (normalizeForMatch(l.whatsappTo) === fromNorm) {
+          match = l;
+          break;
+        }
+      }
+
+      // 5a. Ping email + WhatsApp à Norman (même si pas matché — on lui passe quand même
+      //     le message en mode "numéro inconnu" pour qu'il puisse identifier manuellement).
+      const adleadUrl = match ? buildAdleadLeadUrl(match.programId, match.leadId) : null;
+      const contactDisplay = match ? (match.contactName || profileName || fromE164)
+                                   : (profileName || fromE164);
+      const programDisplay = match ? (match.programName || `programme #${match.programId}`)
+                                   : '— (lead inconnu)';
+      const notifSubject = match
+        ? `📱 RÉPONSE WhatsApp — ${contactDisplay} — ${programDisplay}`
+        : `📱 WhatsApp ${profileName ? `de ${profileName}` : `inconnu`} (${fromE164}) — lead non identifié`;
+      const matchSection = match ? `
+<ul style="list-style: none; padding-left: 0;">
+  <li>• <strong>Prospect</strong> : ${match.contactName || profileName || '(non renseigné)'}</li>
+  <li>• <strong>Numéro WhatsApp</strong> : ${fromE164}${profileName ? ` (profil : ${profileName})` : ''}</li>
+  <li>• <strong>Programme</strong> : ${match.programName || '—'} (id ${match.programId})</li>
+  <li>• <strong>Lien Adlead</strong> : <a href="${adleadUrl}">${adleadUrl}</a></li>
+</ul>` : `
+<p>⚠️ <strong>Aucun lead trouvé avec ce numéro</strong> (${fromE164}). Soit la relance auto n'a jamais été envoyée à ce numéro, soit le formatage du téléphone diffère côté Adlead vs WhatsApp.</p>
+<ul style="list-style: none; padding-left: 0;">
+  <li>• <strong>Numéro WhatsApp</strong> : ${fromE164}</li>
+  <li>• <strong>Profil WhatsApp</strong> : ${profileName || '—'}</li>
+</ul>`;
+      const notifHtml = `
+<!doctype html><html lang="fr"><body style="font-family: Arial, sans-serif; font-size: 14px; color: #222; line-height: 1.55;">
+<p>Bonjour Norman,</p>
+<p>Un prospect ${match ? `(<strong>${contactDisplay}</strong>) ` : ''}vient de répondre par <strong>WhatsApp</strong> à une relance auto sur <strong>${programDisplay}</strong>.</p>
+${matchSection}
+<h3 style="margin-top: 24px;">Message du client :</h3>
+<blockquote style="border-left: 3px solid #25D366; padding: 10px 12px; color: #222; background: #f6fff8; border-radius: 4px;">
+  ${body.replace(/\n/g, '<br>')}
+</blockquote>
+${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; border-left: 4px solid #f0c000; border-radius: 4px;">
+  ⚠️ <strong>Pense à poser une action côté Adlead</strong> pour bloquer le lead (sinon un autre commercial peut le récupérer).
+</p>` : ''}
+<p style="color: #888; font-size: 12px; margin-top: 24px;">— Reply Watcher WhatsApp · Twilio incoming (sid: ${msgSid || 'n/a'})</p>
+</body></html>`;
+
+      try {
+        await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, notifSubject, notifHtml);
+        console.log(`[webhook/whatsapp-incoming] ✅ mail récap envoyé à ${CONFIG.INTERNAL_NOTIF_EMAIL}`);
+      } catch (e) {
+        console.error(`[webhook/whatsapp-incoming] ⚠️ mail récap échec: ${e.message}`);
+      }
+
+      // 5b. WhatsApp à Norman (notif urgente courte sur son téléphone)
+      if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
+        try {
+          const waBody = match
+            ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD URGENTE\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"\n\n→ Adlead : ${adleadUrl}`
+            : `📱 WhatsApp inconnu ${profileName ? `(${profileName})` : ''} — ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"\n\n(pas matché à un lead — voir mail)`;
+          const resp = await sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
+          console.log(`[webhook/whatsapp-incoming] ✅ WhatsApp Norman envoyé (sid: ${resp.sid})`);
+        } catch (e) {
+          console.error(`[webhook/whatsapp-incoming] ⚠️ WhatsApp Norman échec: ${e.message}`);
+        }
+      }
+
+      // 5c. Notif Telegram à Norman (canal urgent supplémentaire — indépendant du WhatsApp
+      //     interne qui ne marchera plus en prod Meta sans template approuvé).
+      if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+        try {
+          const tgText = match ? (
+            `📱 <b>RÉPONSE WhatsApp prospect — ACTION ADLEAD URGENTE</b>\n\n` +
+            `• <b>Prospect</b> : ${escapeTelegramHtml(contactDisplay)}\n` +
+            `• <b>Programme</b> : ${escapeTelegramHtml(match.programName || '—')}\n` +
+            `• <b>Numéro</b> : <code>${escapeTelegramHtml(fromE164)}</code>${profileName ? ` <i>(${escapeTelegramHtml(profileName)})</i>` : ''}\n\n` +
+            `<blockquote>${escapeTelegramHtml(body.slice(0, 800))}${body.length > 800 ? '…' : ''}</blockquote>\n\n` +
+            `→ <a href="${adleadUrl}">Ouvrir dans Adlead</a>\n\n` +
+            `<i>⚠️ Pose une action Adlead immédiatement (autre vendeur peut prendre le lead).</i>`
+          ) : (
+            `📱 <b>WhatsApp inconnu</b> — lead non identifié\n\n` +
+            `• <b>Numéro</b> : <code>${escapeTelegramHtml(fromE164)}</code>${profileName ? ` <i>(${escapeTelegramHtml(profileName)})</i>` : ''}\n\n` +
+            `<blockquote>${escapeTelegramHtml(body.slice(0, 800))}${body.length > 800 ? '…' : ''}</blockquote>\n\n` +
+            `<i>Aucun lead "sent" trouvé pour ce numéro. Voir mail pour détails.</i>`
+          );
+          const resp = await sendTelegramNotification(tgText);
+          console.log(`[webhook/whatsapp-incoming] ✅ Telegram envoyé (message_id: ${resp?.result?.message_id || 'n/a'})`);
+        } catch (e) {
+          console.error(`[webhook/whatsapp-incoming] ⚠️ Telegram échec: ${e.message}`);
+        }
+      }
+
+      // 6. Sales-action Adlead "Réponse WhatsApp reçue" (seulement si lead matché)
+      if (match) {
+        try {
+          await inboxWatcher.createAdleadReplySalesAction({
+            programId: match.programId,
+            leadId: match.leadId,
+            category: 'whatsapp_reply',
+            reasoning: `Réponse WhatsApp du prospect : ${body.slice(0, 200)}`,
+          });
+          console.log(`[webhook/whatsapp-incoming] ✅ sales-action Adlead créée sur lead ${match.leadId}`);
+        } catch (e) {
+          console.error(`[webhook/whatsapp-incoming] ⚠️ sales-action Adlead échec: ${e.message}`);
+        }
+      }
+
+      // 7. Trace dans processedLeads pour audit dashboard
+      processedLeads.push({
+        id: `wa-reply-${msgSid || Date.now()}`,
+        status: 'whatsapp_reply_received',
+        leadId: match ? match.leadId : null,
+        programId: match ? match.programId : null,
+        programName: match ? match.programName : null,
+        contactName: match ? match.contactName : null,
+        whatsappFrom: fromE164,
+        whatsappBody: body,
+        whatsappMessageSid: msgSid,
+        whatsappProfileName: profileName,
+        relatedSentId: match ? match.id : null,
+        matched: !!match,
+        receivedAt: new Date().toISOString(),
+        processedAt: new Date().toISOString(),
+      });
+      saveProcessed();
+    } catch (err) {
+      console.error('[webhook/whatsapp-incoming] erreur traitement:', err.message, err.stack);
     }
   });
 });
