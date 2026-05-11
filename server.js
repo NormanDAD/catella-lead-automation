@@ -16,6 +16,16 @@ const CONFIG = {
   POWER_AUTOMATE_SECRET: process.env.POWER_AUTOMATE_SECRET || '',
   SENDER_EMAIL:          process.env.SENDER_EMAIL || 'norman.dadon@catella.com',
   INTERNAL_NOTIF_EMAIL:  process.env.INTERNAL_NOTIF_EMAIL || 'norman.dadon@catella.com',
+  // Numéro WhatsApp de Norman au format E164 (ex: +33612345678) — pour notif
+  // urgente "lead traité, pose une action Adlead". En plus du mail interne, un
+  // WhatsApp court est envoyé à ce numéro à chaque envoi sortant. Norman doit
+  // avoir fait join du sandbox Twilio (= recevoir des WhatsApp depuis +14155238886).
+  INTERNAL_NOTIF_PHONE:  process.env.INTERNAL_NOTIF_PHONE || '',
+  // Active l'envoi du mail récap "Réponse client reçue" via webhook PA.
+  // false par défaut car Norman s'en fout : son besoin urgent c'est la notif
+  // "lead traité, pose une action Adlead" (sendInternalNotif), pas la classification
+  // de la réponse. Passer à true si on veut ré-activer.
+  REPLY_NOTIF_ENABLED:   process.env.REPLY_NOTIF_ENABLED === 'true',
   ADLEAD_UI_BASE:        process.env.ADLEAD_UI_BASE || 'https://crm.adlead.immo/catella',
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
@@ -25,6 +35,15 @@ const CONFIG = {
   //   - checkAt = maintenant (traitement au prochain tick scheduler, < 5 min)
   //   - force = true (bypass check "commercial a pris la main")
   INSTANT_PROGRAM_IDS:   String(process.env.INSTANT_PROGRAM_IDS || '')
+                           .split(',')
+                           .map(s => s.trim())
+                           .filter(Boolean),
+  // Liste d'IDs de programmes (CSV) EXCLUS des relances automatiques.
+  //   - À l'arrivée du webhook : le lead n'est PAS enqueue (= jamais traité)
+  //   - Pour les leads déjà en queue avant l'ajout à la liste : skip au traitement
+  //     avec status='excluded' (lisible côté dashboard pour audit).
+  // Modifiable à chaud depuis Railway sans push de code.
+  EXCLUDED_PROGRAM_IDS:  String(process.env.EXCLUDED_PROGRAM_IDS || '')
                            .split(',')
                            .map(s => s.trim())
                            .filter(Boolean),
@@ -103,6 +122,12 @@ if (INSTANT_PROGRAM_SET.size > 0) {
   console.log(`[config] Programmes en envoi IMMÉDIAT (sans délai 24h): ${[...INSTANT_PROGRAM_SET].join(', ')}`);
 } else {
   console.log(`[config] Aucun programme en envoi immédiat — tous les leads attendent ${CONFIG.DELAY_HOURS}h`);
+}
+
+// Set des programIds exclus complètement des relances automatiques
+const EXCLUDED_PROGRAM_SET = new Set(CONFIG.EXCLUDED_PROGRAM_IDS);
+if (EXCLUDED_PROGRAM_SET.size > 0) {
+  console.log(`[config] Programmes EXCLUS des relances auto: ${[...EXCLUDED_PROGRAM_SET].join(', ')}`);
 }
 
 // ─── PROGRAMMES DATA ───────────────────────────────────────────────────────
@@ -421,7 +446,30 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   <p>Merci de poser l'action "E-mail envoyé" dans la timeline du lead.</p>
   <p style="color: #888; font-size: 12px;">— Pipeline Catella Lead Automation</p>
 </body></html>`;
-  return sendEmailViaPowerAutomate(to, subject, html);
+  // 1. Mail interne (Gmail Norman). On NE bloque pas si ça échoue.
+  try {
+    await sendEmailViaPowerAutomate(to, subject, html);
+  } catch (e) {
+    console.error(`[internal-notif] échec mail Gmail lead ${leadId}: ${e.message}`);
+  }
+  // 2. Notif WhatsApp à Norman lui-même (canal redondant pour pas rater le ping).
+  //    Best-effort : si le WhatsApp Twilio échoue, le mail Gmail est censé suffire.
+  if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
+    try {
+      const waBody =
+        `🚨 Lead traité auto — ACTION ADLEAD URGENTE\n` +
+        `Programme : ${programName || 'inconnu'}\n` +
+        `Contact : ${contactName || contactEmail || 'inconnu'}\n` +
+        `→ ${adleadUrl}\n` +
+        `(Pose une action Adlead avant qu'un autre vendeur ne te vole le lead.)`;
+      const resp = await sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
+      console.log(`[internal-notif] ✅ WhatsApp ping envoyé à ${CONFIG.INTERNAL_NOTIF_PHONE} (sid: ${resp?.sid || 'n/a'}) — lead ${leadId}`);
+    } catch (e) {
+      console.error(`[internal-notif] ⚠️ WhatsApp ping échec lead ${leadId}: ${e.message}`);
+    }
+  } else if (!CONFIG.INTERNAL_NOTIF_PHONE) {
+    console.log(`[internal-notif] (info) INTERNAL_NOTIF_PHONE non configuré → pas de WhatsApp ping. Lead ${leadId}.`);
+  }
 }
 
 // Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
@@ -840,6 +888,13 @@ function enqueueLead(payload) {
   const leadId = data.lead_id || data.leadId || data.context?.lead_id;
   const programId = data.program_id || data.programId || data.context?.program_id;
 
+  // EXCLUSION : si le programme est dans EXCLUDED_PROGRAM_IDS, on n'enqueue PAS
+  // (= jamais traité, jamais d'envoi). Configurable à chaud côté Railway.
+  if (programId && EXCLUDED_PROGRAM_SET.has(String(programId))) {
+    console.log(`[enqueue] Lead ${leadId} (programme ${programId}) IGNORÉ — programme dans EXCLUDED_PROGRAM_IDS`);
+    return null;
+  }
+
   // Envoi immédiat si le programme est dans INSTANT_PROGRAM_IDS
   // (cas : Norman est lui-même le commercial sur ce programme, pas besoin d'attendre 24h)
   const isInstant = programId && INSTANT_PROGRAM_SET.has(String(programId));
@@ -917,6 +972,19 @@ async function processPendingLead(entry) {
     });
     saveProcessed();
   };
+
+  // EXCLUSION programmes : rattrape les leads déjà en queue dont le programme
+  // a été ajouté à EXCLUDED_PROGRAM_IDS après l'enqueue. On ne traite pas, on
+  // marque comme 'excluded' pour audit côté dashboard.
+  if (entry.programId && EXCLUDED_PROGRAM_SET.has(String(entry.programId))) {
+    console.log(`[process] lead ${entry.leadId} programme ${entry.programId} dans EXCLUDED_PROGRAM_IDS → skip définitif`);
+    return finalize({
+      id: entry.interestId,
+      status: 'excluded',
+      reason: `Programme ${entry.programId} dans EXCLUDED_PROGRAM_IDS`,
+      programId: entry.programId,
+    });
+  }
 
   entry.attempts = (entry.attempts || 0) + 1;
   savePending();
@@ -2267,11 +2335,18 @@ app.post('/webhook/inbox-reply', async (req, res) => {
 <p style="color: #888; font-size: 12px; margin-top: 24px;">— Reply Watcher Catella · Power Automate trigger</p>
 </body></html>`;
 
-      try {
-        await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, notifSubject, notifHtml);
-        console.log(`[webhook/inbox-reply] ✅ notif brouillon envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL}`);
-      } catch (e) {
-        console.error(`[webhook/inbox-reply] ⚠️ notif Norman échec: ${e.message}`);
+      // Mail récap "Réponse client" — désactivé par défaut (Norman s'en fout ;
+      // priorité = notifs urgentes "lead traité, pose une action Adlead").
+      // Pour réactiver : REPLY_NOTIF_ENABLED=true sur Railway.
+      if (CONFIG.REPLY_NOTIF_ENABLED) {
+        try {
+          await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, notifSubject, notifHtml);
+          console.log(`[webhook/inbox-reply] ✅ notif brouillon envoyée à ${CONFIG.INTERNAL_NOTIF_EMAIL}`);
+        } catch (e) {
+          console.error(`[webhook/inbox-reply] ⚠️ notif Norman échec: ${e.message}`);
+        }
+      } else {
+        console.log(`[webhook/inbox-reply] (info) REPLY_NOTIF_ENABLED=false → pas de mail récap (lead ${relance.leadId})`);
       }
 
       // 5. Sales-action Adlead "Réponse reçue"
