@@ -2870,7 +2870,9 @@ async function processJ15CandidateWithRetry(record, maxRetries = 3) {
     } catch (e) {
       const msg = String(e.message || '');
       if (msg.includes('429 Too Many Requests') && attempt < maxRetries) {
-        const m = msg.match(/réessayer dans (\d+) seconde/);
+        // Le message Adlead arrive en JSON avec é (unicode escape), donc
+        // on matche sur "dans X seconde" plutôt que sur "réessayer".
+        const m = msg.match(/dans (\d+) seconde/);
         const waitS = m ? Number(m[1]) + 2 : 30;
         console.log(`[j15] 429 sur lead ${record.leadId}, attente ${waitS}s (tentative ${attempt + 1}/${maxRetries})`);
         await j15Sleep(waitS * 1000);
