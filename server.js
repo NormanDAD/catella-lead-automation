@@ -2858,6 +2858,29 @@ async function processJ15Candidate(record) {
   return { sent: true, email, subject, emailError, whatsappTo, whatsappSid, whatsappError };
 }
 
+// Throttle pour respecter le rate limit Adlead (60 req/min).
+const j15Sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Wrapper avec retry sur 429 Too Many Requests Adlead. Le message Adlead contient
+// "réessayer dans X secondes" → on parse X et on attend X+2s avant retry.
+async function processJ15CandidateWithRetry(record, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await processJ15Candidate(record);
+    } catch (e) {
+      const msg = String(e.message || '');
+      if (msg.includes('429 Too Many Requests') && attempt < maxRetries) {
+        const m = msg.match(/réessayer dans (\d+) seconde/);
+        const waitS = m ? Number(m[1]) + 2 : 30;
+        console.log(`[j15] 429 sur lead ${record.leadId}, attente ${waitS}s (tentative ${attempt + 1}/${maxRetries})`);
+        await j15Sleep(waitS * 1000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 let j15TickRunning = false;
 async function j15Tick({ dryRun = false } = {}) {
   if (j15TickRunning) return { skipped: 'tick déjà en cours' };
@@ -2868,9 +2891,12 @@ async function j15Tick({ dryRun = false } = {}) {
     const candidates = processedLeads.filter(r => isJ15Candidate(r, now));
     console.log(`[j15] ${candidates.length} candidat(s) à examiner (dryRun=${dryRun})`);
     const results = [];
-    for (const record of candidates) {
+    for (let i = 0; i < candidates.length; i++) {
+      // Throttle 1.1s entre chaque candidat → ≤55 req/min, sous le rate limit Adlead.
+      if (i > 0) await j15Sleep(1100);
+      const record = candidates[i];
       try {
-        const result = await processJ15Candidate(record);
+        const result = await processJ15CandidateWithRetry(record);
         results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
         if (result.sent && !dryRun) {
           record.j15Sent = true;
