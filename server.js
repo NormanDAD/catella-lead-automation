@@ -64,6 +64,16 @@ const CONFIG = {
   //   Variables : {{1}} = prénom, {{2}} = nom du programme.
   // À renseigner sur Railway dès que le template passe "Approved" côté Meta.
   TWILIO_TEMPLATE_RELANCE_J1: process.env.TWILIO_TEMPLATE_RELANCE_J1 || '',
+  // ── Relance J+15 (récupération de leads en stagnation) ───────────────────
+  // Cron quotidien qui relance les leads dont le statut Adlead est "pending"
+  // ("En attente de contact") et dont la dernière action commerciale date de
+  // plus de J15_DELAY_DAYS jours. Kill switch global via J15_ENABLED.
+  // WhatsApp J+15 gated indépendamment via WHATSAPP_J15_ENABLED + TWILIO_TEMPLATE_RELANCE_J15.
+  J15_ENABLED:           process.env.J15_ENABLED === 'true',
+  J15_DELAY_DAYS:        Number(process.env.J15_DELAY_DAYS || 15),
+  J15_CRON_HOUR_PARIS:   Number(process.env.J15_CRON_HOUR_PARIS || 10),
+  TWILIO_TEMPLATE_RELANCE_J15: process.env.TWILIO_TEMPLATE_RELANCE_J15 || '',
+  WHATSAPP_J15_ENABLED:  process.env.WHATSAPP_J15_ENABLED === 'true',
   // Webhook Twilio "incoming WhatsApp" : Twilio nous POSTe à /webhook/whatsapp-incoming
   // dès qu'un prospect répond sur notre numéro WhatsApp Business. On le secure par
   // signature Twilio HMAC (X-Twilio-Signature) — pas d'env var requis (le secret est
@@ -1579,6 +1589,11 @@ app.get('/api/health', (req, res) => {
       delayHours: CONFIG.DELAY_HOURS,
       schedulerIntervalMs: CONFIG.SCHEDULER_INTERVAL_MS,
       instantProgramIds: [...INSTANT_PROGRAM_SET],
+      j15Enabled: CONFIG.J15_ENABLED,
+      j15DelayDays: CONFIG.J15_DELAY_DAYS,
+      j15CronHourParis: CONFIG.J15_CRON_HOUR_PARIS,
+      j15WhatsappEnabled: CONFIG.WHATSAPP_J15_ENABLED,
+      j15TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J15,
     },
     persistence: {
       dataDir: DATA_DIR,
@@ -2037,6 +2052,18 @@ app.get('/api/test/adlead-probe', async (req, res) => {
 // expose un champ de dénonciation directement sur l'objet lead (denounced,
 // registration, active_registration, locked, reported, etc.) qui permettrait
 // de sortir du cul-de-sac /registrations 403.
+// Dry-run J+15 : liste les candidats qui SERAIENT relancés au prochain tick,
+// sans envoyer ni modifier processedLeads. Utile pour valider la règle avant
+// d'activer J15_ENABLED=true en prod.
+app.get('/api/test/j15-dry-run', async (req, res) => {
+  try {
+    const result = await j15Tick({ dryRun: true });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Usage : GET /api/test/lead-dump?programId=611&leadId=1633940
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
@@ -2744,6 +2771,162 @@ app.listen(CONFIG.PORT, () => {
 
 setInterval(schedulerTick, CONFIG.SCHEDULER_INTERVAL_MS);
 schedulerTick().catch(e => console.error('[scheduler] tick initial:', e.message));
+
+// ─── RELANCE J+15 ────────────────────────────────────────────────────────────
+// Cron quotidien à J15_CRON_HOUR_PARIS (heure Europe/Paris) qui scanne
+// processedLeads pour les leads où :
+//   - age (depuis receivedAt) >= J15_DELAY_DAYS jours
+//   - statut Adlead actuel = "pending" ("En attente de contact")
+//   - last_interaction_at est null OU < (now - J15_DELAY_DAYS jours)
+//   - aucune relance J+15 déjà envoyée (idempotence via record.j15Sent)
+// Pour chaque candidat → envoie email J+15 + WhatsApp J+15 (gated).
+
+const J15_ELIGIBLE_STATUSES = new Set(['sent', 'cancelled', 'skipped', 'error']);
+
+function isJ15Candidate(record, now) {
+  if (record.j15Sent) return false;
+  if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false;
+  if (!record.leadId || !record.programId) return false;
+  if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
+  const refMs = new Date(record.receivedAt || record.processedAt || 0).getTime();
+  if (!refMs) return false;
+  const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
+  return ageDays >= CONFIG.J15_DELAY_DAYS;
+}
+
+function buildJ15Email(firstName, programName) {
+  const subject = `Toujours intéressé(e) par ${programName} ?`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Je reviens vers vous concernant votre demande sur ${programName}, déposée il y a quelques semaines.</p>
+<p>Sans nouvelles, je voulais m'assurer que votre projet immobilier est toujours d'actualité. Depuis votre première demande quelques lots se sont libérés et il reste des opportunités intéressantes selon votre budget et votre recherche.</p>
+<p>N'hésitez pas à me répondre directement à ce mail avec vos critères d'acquisition, je pourrai vous envoyer les plans et les prix.</p>
+<p>Souhaitez-vous qu'on prenne 10 minutes au téléphone cette semaine ? Vous pouvez réserver un créneau directement ici :<br/>
+<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
+<p>Au plaisir d'échanger,<br/>
+Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+async function processJ15Candidate(record) {
+  const lead = await fetchLead(record.leadId, { programId: record.programId });
+  if (!lead) return { skipped: true, reason: 'lead introuvable côté Adlead' };
+  if (lead.is_under_prescription === true) return { skipped: true, reason: 'is_under_prescription=true' };
+  if (lead.status !== 'pending')           return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)` };
+
+  const now = Date.now();
+  const cutoff = now - CONFIG.J15_DELAY_DAYS * 24 * 60 * 60 * 1000;
+  if (lead.last_interaction_at) {
+    const liMs = new Date(lead.last_interaction_at).getTime();
+    if (liMs > cutoff) return { skipped: true, reason: `last_interaction_at trop récent (${lead.last_interaction_at})` };
+  }
+
+  const contact = (lead.contacts && lead.contacts[0]) || null;
+  if (!contact) return { skipped: true, reason: 'aucun contact sur le lead' };
+  const email = contact.email || record.email;
+  if (!email) return { skipped: true, reason: "pas d'email sur le contact" };
+  if (contact.has_opted_out === true || contact.opted_out_at) return { skipped: true, reason: 'contact opt-out' };
+
+  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
+  const programName = record.programName || lead.program?.name || `Programme #${record.programId}`;
+  const { subject, html } = buildJ15Email(firstName, programName);
+
+  let emailError = null, whatsappSid = null, whatsappError = null, whatsappTo = null;
+  try {
+    await sendEmailViaPowerAutomate(email, subject, html);
+  } catch (e) {
+    emailError = e.message;
+  }
+
+  if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_RELANCE_J15) {
+    const phone = contact.phone || record.whatsappTo;
+    whatsappTo = normalizePhoneE164(phone);
+    if (whatsappTo) {
+      try {
+        const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
+          templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J15,
+          contentVariables: { '1': firstName, '2': programName },
+        });
+        whatsappSid = r?.sid || null;
+      } catch (e) {
+        whatsappError = e.message;
+      }
+    }
+  }
+
+  return { sent: true, email, subject, emailError, whatsappTo, whatsappSid, whatsappError };
+}
+
+let j15TickRunning = false;
+async function j15Tick({ dryRun = false } = {}) {
+  if (j15TickRunning) return { skipped: 'tick déjà en cours' };
+  if (!dryRun && !CONFIG.J15_ENABLED) return { skipped: 'J15_ENABLED=false' };
+  j15TickRunning = true;
+  try {
+    const now = Date.now();
+    const candidates = processedLeads.filter(r => isJ15Candidate(r, now));
+    console.log(`[j15] ${candidates.length} candidat(s) à examiner (dryRun=${dryRun})`);
+    const results = [];
+    for (const record of candidates) {
+      try {
+        const result = await processJ15Candidate(record);
+        results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
+        if (result.sent && !dryRun) {
+          record.j15Sent = true;
+          record.j15SentAt = new Date().toISOString();
+          record.j15Email = result.email;
+          record.j15Subject = result.subject;
+          record.j15EmailError = result.emailError;
+          record.j15WhatsappTo = result.whatsappTo;
+          record.j15WhatsappSid = result.whatsappSid;
+          record.j15WhatsappError = result.whatsappError;
+        }
+      } catch (e) {
+        console.error(`[j15] lead ${record.leadId} erreur:`, e.message);
+        results.push({ leadId: record.leadId, programId: record.programId, error: e.message });
+      }
+    }
+    if (!dryRun) {
+      saveProcessed();
+      const sentCount = results.filter(r => r.sent).length;
+      const skipCount = results.filter(r => r.skipped).length;
+      const errCount  = results.filter(r => r.error || r.emailError || r.whatsappError).length;
+      if (sentCount + errCount > 0) {
+        try {
+          await sendTelegramNotification(
+            `📤 <b>Tick J+15</b>\nCandidats: ${candidates.length}\nEnvoyés: ${sentCount}\nSkip: ${skipCount}\nErreurs: ${errCount}`
+          );
+        } catch (_) {}
+      }
+    }
+    return { dryRun, candidates: candidates.length, results };
+  } finally {
+    j15TickRunning = false;
+  }
+}
+
+let lastJ15RunYmd = null;
+function getParisYmdAndHour() {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  return { ymd: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
+}
+async function j15Cron() {
+  const { ymd, hour } = getParisYmdAndHour();
+  if (hour !== CONFIG.J15_CRON_HOUR_PARIS) return;
+  if (lastJ15RunYmd === ymd) return;
+  lastJ15RunYmd = ymd;
+  try { await j15Tick(); }
+  catch (e) { console.error('[j15-cron] erreur:', e.message); }
+}
+setInterval(j15Cron, 5 * 60 * 1000);
+j15Cron().catch(e => console.error('[j15-cron] check initial:', e.message));
 
 // ─── SCHEDULER INBOX (réponses prospect) ────────────────────────────────────
 // Poll séparé pour ne pas ralentir le scheduler principal. Kill-switch via
