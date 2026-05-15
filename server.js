@@ -2829,7 +2829,27 @@ async function processJ15Candidate(record) {
   if (contact.has_opted_out === true || contact.opted_out_at) return { skipped: true, reason: 'contact opt-out' };
 
   const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
-  const programName = record.programName || lead.program?.name || `Programme #${record.programId}`;
+
+  // Résolution robuste du programName : on REJETTE le fallback "Programme #XXX"
+  // qui peut traîner dans record.programName (posé en J+1 quand l'API Adlead
+  // n'avait pas renvoyé le nom du programme). On retente via fetchProgram pour
+  // avoir un vrai nom — et si toujours rien, on SKIP plutôt que d'envoyer un
+  // mail au sujet "Toujours intéressé par Programme #611 ?" (très peu pro).
+  const BAD_NAME = /^Programme #\d+$/;
+  let programName = record.programName;
+  if (!programName || BAD_NAME.test(programName)) {
+    programName = lead.program?.name || lead.program?.nom_commercial || null;
+  }
+  if (!programName || BAD_NAME.test(programName)) {
+    try {
+      const prog = await fetchProgram(record.programId);
+      programName = prog?.name || prog?.nom_commercial || null;
+    } catch (_) {}
+  }
+  if (!programName || BAD_NAME.test(programName)) {
+    return { skipped: true, reason: `programme non résolu (programId=${record.programId})` };
+  }
+
   const { subject, html } = buildJ15Email(firstName, programName);
 
   let emailError = null, whatsappSid = null, whatsappError = null, whatsappTo = null;
@@ -2909,6 +2929,10 @@ async function j15Tick({ dryRun = false } = {}) {
           record.j15WhatsappTo = result.whatsappTo;
           record.j15WhatsappSid = result.whatsappSid;
           record.j15WhatsappError = result.whatsappError;
+          // CRITIQUE : save APRÈS CHAQUE envoi pour ne pas perdre l'idempotence
+          // si le tick crashe ou est killé en plein vol. Sinon les leads déjà
+          // touchés seront re-spammés au tick suivant. Voir incident 2026-05-15.
+          saveProcessed();
         }
       } catch (e) {
         console.error(`[j15] lead ${record.leadId} erreur:`, e.message);
