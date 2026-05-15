@@ -74,6 +74,12 @@ const CONFIG = {
   J15_CRON_HOUR_PARIS:   Number(process.env.J15_CRON_HOUR_PARIS || 10),
   TWILIO_TEMPLATE_RELANCE_J15: process.env.TWILIO_TEMPLATE_RELANCE_J15 || '',
   WHATSAPP_J15_ENABLED:  process.env.WHATSAPP_J15_ENABLED === 'true',
+  // Kill switch BELT-AND-SUSPENDERS pour les envois J+15 : si true, AUCUN
+  // sendEmail / sendWhatsApp ne peut partir depuis le code path J+15, même
+  // si J15_ENABLED=true et même en mode "réel" (pas dry-run). À utiliser
+  // pour valider le code en prod sans risque d'envoi indu. Ajouté après
+  // l'incident 2026-05-15 (mon /api/test/j15-dry-run envoyait pour de vrai).
+  J15_SEND_DISABLED:     process.env.J15_SEND_DISABLED === 'true',
   // Webhook Twilio "incoming WhatsApp" : Twilio nous POSTe à /webhook/whatsapp-incoming
   // dès qu'un prospect répond sur notre numéro WhatsApp Business. On le secure par
   // signature Twilio HMAC (X-Twilio-Signature) — pas d'env var requis (le secret est
@@ -2064,6 +2070,26 @@ app.get('/api/test/j15-dry-run', async (req, res) => {
   }
 });
 
+// Admin EMERGENCY : marque tous les records dont programName matche
+// /^Programme #\d+$/ comme j15Sent=true. À appeler une fois après l'incident
+// 2026-05-15 pour empêcher tout futur tick J+15 de re-spammer ces leads avec
+// un sujet "Toujours intéressé par Programme #XXX ?". Idempotent.
+app.post('/api/admin/j15-mark-bad-names', (req, res) => {
+  const BAD_NAME = /^Programme #\d+$/;
+  let marked = 0;
+  const at = new Date().toISOString();
+  for (const r of processedLeads) {
+    if (!r.j15Sent && typeof r.programName === 'string' && BAD_NAME.test(r.programName)) {
+      r.j15Sent = true;
+      r.j15SentAt = r.j15SentAt || at;
+      r.j15Note = 'force-marqué après incident 2026-05-15 (programName non résolu)';
+      marked++;
+    }
+  }
+  saveProcessed();
+  res.json({ marked, totalProcessed: processedLeads.length, at });
+});
+
 // Usage : GET /api/test/lead-dump?programId=611&leadId=1633940
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
@@ -2809,7 +2835,7 @@ Catella Residential — Logement neuf</p>`;
   return { subject, html };
 }
 
-async function processJ15Candidate(record) {
+async function processJ15Candidate(record, { dryRun = false, sendDisabled = false } = {}) {
   const lead = await fetchLead(record.leadId, { programId: record.programId });
   if (!lead) return { skipped: true, reason: 'lead introuvable côté Adlead' };
   if (lead.is_under_prescription === true) return { skipped: true, reason: 'is_under_prescription=true' };
@@ -2852,6 +2878,18 @@ async function processJ15Candidate(record) {
 
   const { subject, html } = buildJ15Email(firstName, programName);
 
+  // GATE CRITIQUE — en mode dry-run OU si kill switch sends actif, on retourne
+  // le verdict sans appeler sendEmail/sendWhatsApp. C'est la SEULE manière
+  // correcte de prouver qu'un dry-run n'envoie rien. Voir incident 2026-05-15.
+  if (dryRun || sendDisabled) {
+    return {
+      sent: true,           // would-have-sent
+      email, subject,
+      dryRun: !!dryRun,
+      sendDisabled: !!sendDisabled,
+    };
+  }
+
   let emailError = null, whatsappSid = null, whatsappError = null, whatsappTo = null;
   try {
     await sendEmailViaPowerAutomate(email, subject, html);
@@ -2883,10 +2921,10 @@ const j15Sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Wrapper avec retry sur 429 Too Many Requests Adlead. Le message Adlead contient
 // "réessayer dans X secondes" → on parse X et on attend X+2s avant retry.
-async function processJ15CandidateWithRetry(record, maxRetries = 3) {
+async function processJ15CandidateWithRetry(record, { dryRun = false, sendDisabled = false, maxRetries = 3 } = {}) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await processJ15Candidate(record);
+      return await processJ15Candidate(record, { dryRun, sendDisabled });
     } catch (e) {
       const msg = String(e.message || '');
       if (msg.includes('429 Too Many Requests') && attempt < maxRetries) {
@@ -2918,7 +2956,10 @@ async function j15Tick({ dryRun = false } = {}) {
       if (i > 0) await j15Sleep(1100);
       const record = candidates[i];
       try {
-        const result = await processJ15CandidateWithRetry(record);
+        const result = await processJ15CandidateWithRetry(record, {
+          dryRun,
+          sendDisabled: CONFIG.J15_SEND_DISABLED,
+        });
         results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
         if (result.sent && !dryRun) {
           record.j15Sent = true;
