@@ -2538,7 +2538,10 @@ app.post('/webhook/inbox-reply', async (req, res) => {
   if (!relance) {
     console.log(`[webhook/inbox-reply] aucune relance trackée pour ${fromAddr} (subject: "${subject.slice(0, 60)}") — on ignore`);
     return res.status(200).json({
-      matched: false,
+      // STRING (pas boolean) pour compat directe avec la Condition Power Automate
+      // qui compare textuellement à "true" / "false" — sinon mismatch booléen/string
+      // → ActionBranchingConditionNotSatisfied.
+      matched: 'false',
       reason: 'Aucune relance trackée correspondant à cette adresse/sujet',
       fromEmail: fromAddr,
       subject,
@@ -2607,7 +2610,8 @@ app.post('/webhook/inbox-reply', async (req, res) => {
   //    Outlook via l'action "Reply to email (V3)" : conversation préservée, draft
   //    apparaît dans /Brouillons en thread avec le mail original du prospect.
   res.status(200).json({
-    matched: true,
+    // STRING (pas boolean) — voir comment au-dessus dans le no-match branch.
+    matched: 'true',
     matchStrategy: strategy,
     fromEmail: fromAddr,
     fromName,

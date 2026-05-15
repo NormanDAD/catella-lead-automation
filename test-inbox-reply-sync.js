@@ -149,7 +149,7 @@ require(path.resolve(__dirname, 'server.js'));
   console.log('HTTP', r.status, '— response keys:', Object.keys(j));
 
   if (r.status === 200) pass('HTTP 200'); else fail(`HTTP ${r.status}`);
-  if (j.matched === true) pass('matched=true'); else fail(`matched=${j.matched}`);
+  if (j.matched === 'true') pass('matched=true'); else fail(`matched=${j.matched}`);
   if (j.leadId === 1639255) pass('leadId=1639255'); else fail(`leadId=${j.leadId}`);
   if (j.programName === 'Les Terrasses de la Bièvre') pass('programName OK'); else fail(`programName=${j.programName}`);
   if (j.classification?.category === 'rdv') pass('classification.category=rdv'); else fail(`category=${j.classification?.category}`);
@@ -173,7 +173,7 @@ require(path.resolve(__dirname, 'server.js'));
     })
   });
   j = await r.json();
-  if (r.status === 200 && j.matched === false) pass('No-match → matched:false');
+  if (r.status === 200 && j.matched === 'false') pass('No-match → matched:false');
   else fail(`HTTP ${r.status} matched=${j.matched}`);
   if (!j.draft) pass('Pas de draft en no-match'); else fail('draft présent en no-match');
   if (outboundCalls.anthropic === 0) pass('Anthropic non appelé (skip avant Claude)'); else fail(`anthropic=${outboundCalls.anthropic} en no-match`);
@@ -195,7 +195,7 @@ require(path.resolve(__dirname, 'server.js'));
   j = await r.json();
   if (r.status === 200) pass('HTTP 200 même avec Claude KO');
   else fail(`HTTP ${r.status} avec Claude KO`);
-  if (j.matched === true) pass('matched=true même avec Claude KO');
+  if (j.matched === 'true') pass('matched=true même avec Claude KO');
   else fail(`matched=${j.matched} avec Claude KO`);
   if (j.draft?.html?.length > 50) pass(`fallback draft non vide (${j.draft.html.length} chars)`);
   else fail('fallback draft vide');
