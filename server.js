@@ -2559,7 +2559,8 @@ app.post('/webhook/inbox-reply', async (req, res) => {
       leadContext: leadCtx,
       programContext: programCtx,
     });
-    draftHtml = inboxWatcher.wrapWithSignature(draft?.htmlBody || draft?.body || '');
+    // draftResponse renvoie { shouldDraft, html, internalNote }
+    draftHtml = inboxWatcher.wrapWithSignature(draft?.html || '');
     internalNote = draft?.internalNote || null;
   } catch (e) {
     console.error(`[webhook/inbox-reply] draftResponse échec: ${e.message}`);
