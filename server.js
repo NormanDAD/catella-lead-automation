@@ -80,6 +80,21 @@ const CONFIG = {
   // pour valider le code en prod sans risque d'envoi indu. Ajouté après
   // l'incident 2026-05-15 (mon /api/test/j15-dry-run envoyait pour de vrai).
   J15_SEND_DISABLED:     process.env.J15_SEND_DISABLED === 'true',
+  // ── Relance J+3 du matin (3 jours consécutifs après passage en "pending") ──
+  // Cron quotidien à 9h15 Paris qui relance les leads dont le statut Adlead
+  // est passé à "pending" depuis ≥24h, avec 3 messages d'escalation :
+  //   Jour 1 : email "doux"     ("Petit point sur votre demande")
+  //   Jour 2 : WhatsApp "moyen" (template approved Meta, fallback email si pas dispo)
+  //   Jour 3 : email "final"    ("Dernier point avant de classer")
+  // Stop dès que lead.status ≠ "pending" (= prospect a répondu OU Norman a re-statué).
+  J3M_ENABLED:           process.env.J3M_ENABLED === 'true',
+  J3M_SEND_DISABLED:     process.env.J3M_SEND_DISABLED === 'true',
+  J3M_CRON_HOUR_PARIS:   Number(process.env.J3M_CRON_HOUR_PARIS || 9),
+  J3M_CRON_MIN_MINUTE:   Number(process.env.J3M_CRON_MIN_MINUTE || 15),
+  WHATSAPP_J3M_ENABLED:  process.env.WHATSAPP_J3M_ENABLED === 'true',
+  // ContentSid Twilio du template Meta "relance_j3m_day2_catella" (jour 2 = WhatsApp).
+  // Si vide → fallback email pour le jour 2 (ne casse pas le cycle).
+  TWILIO_TEMPLATE_J3M_DAY2: process.env.TWILIO_TEMPLATE_J3M_DAY2 || '',
   // Webhook Twilio "incoming WhatsApp" : Twilio nous POSTe à /webhook/whatsapp-incoming
   // dès qu'un prospect répond sur notre numéro WhatsApp Business. On le secure par
   // signature Twilio HMAC (X-Twilio-Signature) — pas d'env var requis (le secret est
@@ -1600,6 +1615,11 @@ app.get('/api/health', (req, res) => {
       j15CronHourParis: CONFIG.J15_CRON_HOUR_PARIS,
       j15WhatsappEnabled: CONFIG.WHATSAPP_J15_ENABLED,
       j15TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J15,
+      j3mEnabled: CONFIG.J3M_ENABLED,
+      j3mSendDisabled: CONFIG.J3M_SEND_DISABLED,
+      j3mCronHourParis: CONFIG.J3M_CRON_HOUR_PARIS,
+      j3mWhatsappEnabled: CONFIG.WHATSAPP_J3M_ENABLED,
+      j3mTemplateDay2Configured: !!CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
     },
     persistence: {
       dataDir: DATA_DIR,
@@ -2064,6 +2084,17 @@ app.get('/api/test/adlead-probe', async (req, res) => {
 app.get('/api/test/j15-dry-run', async (req, res) => {
   try {
     const result = await j15Tick({ dryRun: true });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Dry-run J+3 matin : liste les candidats qui SERAIENT relancés au prochain
+// tick 9h15 Paris, sans envoyer. Utile pour valider la règle avant activation.
+app.get('/api/test/j3m-dry-run', async (req, res) => {
+  try {
+    const result = await j3mTick({ dryRun: true });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3020,6 +3051,305 @@ async function j15Cron() {
 }
 setInterval(j15Cron, 5 * 60 * 1000);
 j15Cron().catch(e => console.error('[j15-cron] check initial:', e.message));
+
+// ─── RELANCE J+3 MATIN (3 messages d'escalation post-pending) ────────────────
+// Cron quotidien à 9h15 Paris qui relance les leads dont le statut Adlead est
+// "pending" depuis ≥24h. 3 jours consécutifs avec escalation E/W/E :
+//   Jour 1 : email "doux"
+//   Jour 2 : WhatsApp "moyen" (fallback email si template Meta pas dispo)
+//   Jour 3 : email "final"
+// Stop dès que lead.status ≠ "pending" → reset pendingSince + j3mRelances.
+// Idempotence : si j3mRelances >= 3 le lead n'est plus candidat.
+
+function getParisYmdHourMinute() {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  return {
+    ymd: `${get('year')}-${get('month')}-${get('day')}`,
+    hour: Number(get('hour')),
+    minute: Number(get('minute')),
+  };
+}
+
+function isJ3MCandidate(record, now) {
+  if (!record.leadId || !record.programId) return false;
+  if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
+  if ((record.j3mRelances || 0) >= 3) return false;
+  const refMs = new Date(record.receivedAt || record.processedAt || 0).getTime();
+  if (!refMs) return false;
+  const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
+  if (ageDays > 60) return false; // trop vieux, on laisse J+15 ou abandon
+  return true;
+}
+
+function buildJ3MEmailDay1(firstName, programName) {
+  const subject = `Petit point sur votre demande ${programName}`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Petit point rapide concernant votre demande pour ${programName}. Je n'ai pas encore eu votre retour suite à mes premiers messages, et je préférais m'assurer que vous les avez bien reçus.</p>
+<p>Avez-vous quelques minutes pour qu'on échange brièvement de votre projet ? Vous pouvez réserver un créneau directement ici :<br/>
+<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
+<p>Au plaisir d'échanger,<br/>
+Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+function buildJ3MEmailDay2Fallback(firstName, programName) {
+  // Fallback email pour le jour 2 quand le template WhatsApp Meta n'est pas
+  // disponible. Reprend le wording WhatsApp validé par Norman.
+  const subject = `${programName} — disponibilités à étudier`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Je reviens vers vous concernant votre demande sur ${programName}.</p>
+<p>Je viens de regarder le programme : nous avons encore des disponibilités. Si votre projet est toujours d'actualité, c'est le moment d'en discuter. N'hésitez pas à me donner vos critères d'acquisition.</p>
+<p>Ou discutons : avez-vous 10 minutes cette semaine ? Réservation directe ici :<br/>
+<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
+<p>Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+function buildJ3MEmailDay3(firstName, programName) {
+  const subject = `${programName} — dernier point avant de classer votre dossier`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Dernier message de ma part concernant ${programName}.</p>
+<p>Sans nouvelles, je vais classer votre dossier en fin de semaine. Si votre projet immobilier est toujours d'actualité, c'est vraiment le moment de me le faire savoir.</p>
+<ul>
+<li>Réservez un créneau ici pour qu'on échange : <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></li>
+<li>Ou répondez directement à ce mail avec vos critères, je vous envoie immédiatement les plans et les prix disponibles.</li>
+</ul>
+<p>Je reste à votre disposition,<br/>
+Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+async function processJ3MCandidate(record, { dryRun = false, sendDisabled = false } = {}) {
+  const lead = await fetchLead(record.leadId, { programId: record.programId });
+  if (!lead) return { skipped: true, reason: 'lead introuvable côté Adlead' };
+
+  // Safety : dénonciation bloque toujours (consistant avec J+1 et J+15).
+  if (lead.is_under_prescription === true) {
+    return { skipped: true, reason: 'is_under_prescription=true' };
+  }
+
+  // Status check — règle Option A : si status ≠ pending, on reset et on stop.
+  if (lead.status !== 'pending') {
+    let reset = false;
+    if (record.pendingSince || (record.j3mRelances || 0) > 0) {
+      if (!dryRun) {
+        record.pendingSince = null;
+        record.j3mRelances = 0;
+      }
+      reset = true;
+    }
+    return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)`, reset };
+  }
+
+  // Première détection du status pending → on note pendingSince, on n'envoie pas.
+  if (!record.pendingSince) {
+    const nowIso = new Date().toISOString();
+    if (!dryRun) record.pendingSince = nowIso;
+    return {
+      skipped: true,
+      reason: 'pendingSince noté, première détection — 24h d\'attente avant relance',
+      pendingSinceSet: nowIso,
+    };
+  }
+
+  // 24h wait depuis pendingSince.
+  const pendingMs = new Date(record.pendingSince).getTime();
+  const ageHours = (Date.now() - pendingMs) / (1000 * 60 * 60);
+  if (ageHours < 24) {
+    return { skipped: true, reason: `pending depuis seulement ${ageHours.toFixed(1)}h, attente 24h min` };
+  }
+
+  // Max 3 relances.
+  const currentCount = record.j3mRelances || 0;
+  if (currentCount >= 3) {
+    return { skipped: true, reason: 'max 3 relances atteintes' };
+  }
+  const dayNumber = currentCount + 1; // 1, 2, ou 3
+
+  // Contact + email check.
+  const contact = (lead.contacts && lead.contacts[0]) || null;
+  if (!contact) return { skipped: true, reason: 'aucun contact sur le lead' };
+  const email = contact.email || record.email;
+  if (!email) return { skipped: true, reason: "pas d'email sur le contact" };
+  if (contact.has_opted_out === true || contact.opted_out_at) return { skipped: true, reason: 'contact opt-out' };
+
+  // Résolution robuste programName (refus bad-name fallback, cf J+15).
+  const BAD_NAME = /^Programme #\d+$/;
+  let programName = record.programName;
+  if (!programName || BAD_NAME.test(programName)) {
+    programName = lead.program?.name || lead.program?.nom_commercial || null;
+  }
+  if (!programName || BAD_NAME.test(programName)) {
+    try { const prog = await fetchProgram(record.programId); programName = prog?.name || prog?.nom_commercial || null; }
+    catch (_) {}
+  }
+  if (!programName || BAD_NAME.test(programName)) {
+    return { skipped: true, reason: `programme non résolu (programId=${record.programId})` };
+  }
+
+  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
+
+  // Determine channel + content pour ce jour.
+  let channel, subject = null, html = null, whatsappTo = null;
+  if (dayNumber === 1) {
+    channel = 'email';
+    ({ subject, html } = buildJ3MEmailDay1(firstName, programName));
+  } else if (dayNumber === 2) {
+    if (CONFIG.WHATSAPP_J3M_ENABLED && CONFIG.TWILIO_TEMPLATE_J3M_DAY2) {
+      channel = 'whatsapp';
+      whatsappTo = normalizePhoneE164(contact.phone || record.whatsappTo);
+    } else {
+      // Fallback email pour ne pas casser le cycle d'escalation.
+      channel = 'email-fallback';
+      ({ subject, html } = buildJ3MEmailDay2Fallback(firstName, programName));
+    }
+  } else { // dayNumber === 3
+    channel = 'email';
+    ({ subject, html } = buildJ3MEmailDay3(firstName, programName));
+  }
+
+  // GATE CRITIQUE (cf incident 2026-05-15) — en dry-run ou sendDisabled,
+  // on retourne le verdict sans appeler sendEmail/sendWhatsApp.
+  if (dryRun || sendDisabled) {
+    return {
+      sent: true,
+      dayNumber, channel, email, subject, whatsappTo,
+      dryRun: !!dryRun, sendDisabled: !!sendDisabled,
+    };
+  }
+
+  // Envoi réel.
+  let emailError = null, whatsappSid = null, whatsappError = null;
+  if (channel === 'email' || channel === 'email-fallback') {
+    try {
+      await sendEmailViaPowerAutomate(email, subject, html);
+    } catch (e) { emailError = e.message; }
+  } else if (channel === 'whatsapp') {
+    if (whatsappTo) {
+      try {
+        const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
+          templateSid: CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
+          contentVariables: { '1': firstName, '2': programName },
+        });
+        whatsappSid = r?.sid || null;
+      } catch (e) { whatsappError = e.message; }
+    } else {
+      whatsappError = 'no valid phone';
+    }
+  }
+
+  return {
+    sent: true,
+    dayNumber, channel, email, subject, whatsappTo,
+    emailError, whatsappSid, whatsappError,
+  };
+}
+
+async function processJ3MCandidateWithRetry(record, { dryRun = false, sendDisabled = false, maxRetries = 3 } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await processJ3MCandidate(record, { dryRun, sendDisabled });
+    } catch (e) {
+      const msg = String(e.message || '');
+      if (msg.includes('429 Too Many Requests') && attempt < maxRetries) {
+        const m = msg.match(/dans (\d+) seconde/);
+        const waitS = m ? Number(m[1]) + 2 : 30;
+        console.log(`[j3m] 429 sur lead ${record.leadId}, attente ${waitS}s (tentative ${attempt + 1}/${maxRetries})`);
+        await j15Sleep(waitS * 1000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+let j3mTickRunning = false;
+async function j3mTick({ dryRun = false } = {}) {
+  if (j3mTickRunning) return { skipped: 'tick déjà en cours' };
+  if (!dryRun && !CONFIG.J3M_ENABLED) return { skipped: 'J3M_ENABLED=false' };
+  j3mTickRunning = true;
+  try {
+    const now = Date.now();
+    const candidates = processedLeads.filter(r => isJ3MCandidate(r, now));
+    console.log(`[j3m] ${candidates.length} candidat(s) à examiner (dryRun=${dryRun})`);
+    const results = [];
+    let stateChangedNoSend = false;
+    for (let i = 0; i < candidates.length; i++) {
+      if (i > 0) await j15Sleep(1100); // réutilise le throttle Adlead
+      const record = candidates[i];
+      try {
+        const result = await processJ3MCandidateWithRetry(record, {
+          dryRun,
+          sendDisabled: CONFIG.J3M_SEND_DISABLED,
+        });
+        results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
+        if (!dryRun) {
+          // Sauvegarde immédiate après chaque envoi (cf incident 2026-05-15).
+          if (result.sent) {
+            record.j3mRelances = (record.j3mRelances || 0) + 1;
+            record.j3mHistory = record.j3mHistory || [];
+            record.j3mHistory.push({
+              day: result.dayNumber,
+              channel: result.channel,
+              sentAt: new Date().toISOString(),
+              emailError: result.emailError || null,
+              whatsappSid: result.whatsappSid || null,
+              whatsappError: result.whatsappError || null,
+            });
+            saveProcessed();
+          } else if (result.reset || result.pendingSinceSet) {
+            // État muté (pendingSince posé ou reset) → flag pour save final.
+            stateChangedNoSend = true;
+          }
+        }
+      } catch (e) {
+        console.error(`[j3m] lead ${record.leadId} erreur:`, e.message);
+        results.push({ leadId: record.leadId, programId: record.programId, error: e.message });
+      }
+    }
+    if (!dryRun) {
+      if (stateChangedNoSend) saveProcessed();
+      const sentCount = results.filter(r => r.sent).length;
+      const skipCount = results.filter(r => r.skipped).length;
+      const errCount  = results.filter(r => r.error || r.emailError || r.whatsappError).length;
+      if (sentCount + errCount > 0) {
+        try {
+          await sendTelegramNotification(
+            `📤 <b>Tick J+3 matin</b>\nCandidats: ${candidates.length}\nEnvoyés: ${sentCount}\nSkip: ${skipCount}\nErreurs: ${errCount}`
+          );
+        } catch (_) {}
+      }
+    }
+    return { dryRun, candidates: candidates.length, results };
+  } finally {
+    j3mTickRunning = false;
+  }
+}
+
+let lastJ3MRunYmd = null;
+async function j3mCron() {
+  const { ymd, hour, minute } = getParisYmdHourMinute();
+  if (hour !== CONFIG.J3M_CRON_HOUR_PARIS) return;
+  if (minute < CONFIG.J3M_CRON_MIN_MINUTE) return;
+  if (lastJ3MRunYmd === ymd) return;
+  lastJ3MRunYmd = ymd;
+  try { await j3mTick(); }
+  catch (e) { console.error('[j3m-cron] erreur:', e.message); }
+}
+setInterval(j3mCron, 5 * 60 * 1000);
+j3mCron().catch(e => console.error('[j3m-cron] check initial:', e.message));
 
 // ─── SCHEDULER INBOX (réponses prospect) ────────────────────────────────────
 // Poll séparé pour ne pas ralentir le scheduler principal. Kill-switch via
