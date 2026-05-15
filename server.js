@@ -2101,6 +2101,31 @@ app.get('/api/test/j3m-dry-run', async (req, res) => {
   }
 });
 
+// Admin : enregistre une relance "test" dans le tracking inboxWatcher, pour
+// permettre à Norman de valider end-to-end le flow PA en s'envoyant un mail
+// à lui-même depuis un compte externe. Body : { contactEmail, contactName?,
+// leadId?, programId?, programName?, subject? }. À supprimer manuellement après.
+app.post('/api/admin/register-test-relance', (req, res) => {
+  const b = req.body || {};
+  if (!b.contactEmail) return res.status(400).json({ error: 'contactEmail requis' });
+  try {
+    inboxWatcher.registerSentRelance({
+      leadId:        b.leadId        || 999999,
+      programId:     b.programId     || 611,
+      contactEmail:  String(b.contactEmail).toLowerCase().trim(),
+      contactName:   b.contactName   || 'Test',
+      programName:   b.programName   || 'Cristallerie',
+      subject:       b.subject       || 'Votre projet à Sèvres — quelques précisions sur « Cristallerie »',
+    });
+    res.json({ ok: true, registered: {
+      contactEmail: b.contactEmail, leadId: b.leadId || 999999,
+      programId: b.programId || 611, programName: b.programName || 'Cristallerie',
+    }});
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Admin EMERGENCY : marque tous les records dont programName matche
 // /^Programme #\d+$/ comme j15Sent=true. À appeler une fois après l'incident
 // 2026-05-15 pour empêcher tout futur tick J+15 de re-spammer ces leads avec
