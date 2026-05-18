@@ -80,6 +80,15 @@ const CONFIG = {
   // pour valider le code en prod sans risque d'envoi indu. Ajouté après
   // l'incident 2026-05-15 (mon /api/test/j15-dry-run envoyait pour de vrai).
   J15_SEND_DISABLED:     process.env.J15_SEND_DISABLED === 'true',
+  // ── Kill switch J+1 auto-send ────────────────────────────────────────────
+  // Si true, processPendingLead tourne normalement (fetch, checks, dénonciation)
+  // mais SKIP les envois mail/WhatsApp/notif/tag/status. Le record est finalisé
+  // avec status="j1-manual-pending" → Norman traite manuellement. Les règles 2/3
+  // retrouvent le lead via scan processedLeads. Activé en prod depuis 2026-05-18
+  // (Norman a repris la main sur le J+1).
+  J1_AUTO_SEND_DISABLED: process.env.J1_AUTO_SEND_DISABLED === 'true',
+  // ContentSid Twilio du template Meta "relance_j16_catella" (jour 2 de règle 3)
+  TWILIO_TEMPLATE_J16:   process.env.TWILIO_TEMPLATE_J16 || '',
   // ── Relance J+3 du matin (3 jours consécutifs après passage en "pending") ──
   // Cron quotidien à 9h15 Paris qui relance les leads dont le statut Adlead
   // est passé à "pending" depuis ≥24h, avec 3 messages d'escalation :
@@ -1407,6 +1416,25 @@ async function processPendingLead(entry) {
     }
     if (!programName) programName = `Programme #${entry.programId}`;
 
+    // ─── GATE J1_AUTO_SEND_DISABLED ─────────────────────────────────────────
+    // Si activé, on a fait tous les checks (lead valide, contact OK, pas dénoncé,
+    // commercial n'a pas agi) mais on NE déclenche AUCUN envoi auto-J+1. Le record
+    // passe en "j1-manual-pending" → Norman traite manuellement (envoi mail+WhatsApp
+    // + pose actions Adlead). Les règles 2 et 3 retrouvent ce lead via scan
+    // processedLeads pour relancer aux jours J+3/+4/+5 puis J+15/+16/+17.
+    if (CONFIG.J1_AUTO_SEND_DISABLED) {
+      console.log(`[process] J1_AUTO_SEND_DISABLED=true → skip auto-send lead ${entry.leadId} (Norman traite manuellement)`);
+      return finalize({
+        id: entry.interestId,
+        status: 'j1-manual-pending',
+        contactName: contact.fullname || '',
+        email,
+        programId: entry.programId,
+        programName,
+        note: 'Auto-send désactivé via J1_AUTO_SEND_DISABLED — à traiter manuellement (mail + WhatsApp + actions Adlead)',
+      });
+    }
+
     // Lookup programme dans programmes.json (keyé par nom) → accroche personnalisée
     const programme = findProgramme(programName);
     const ville = (programme && programme.ville) || programApi?.city || programApi?.ville || '';
@@ -1620,6 +1648,8 @@ app.get('/api/health', (req, res) => {
       j3mCronHourParis: CONFIG.J3M_CRON_HOUR_PARIS,
       j3mWhatsappEnabled: CONFIG.WHATSAPP_J3M_ENABLED,
       j3mTemplateDay2Configured: !!CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
+      j1AutoSendDisabled: CONFIG.J1_AUTO_SEND_DISABLED,
+      j16TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_J16,
     },
     persistence: {
       dataDir: DATA_DIR,
@@ -2909,28 +2939,59 @@ schedulerTick().catch(e => console.error('[scheduler] tick initial:', e.message)
 //   - aucune relance J+15 déjà envoyée (idempotence via record.j15Sent)
 // Pour chaque candidat → envoie email J+15 + WhatsApp J+15 (gated).
 
-const J15_ELIGIBLE_STATUSES = new Set(['sent', 'cancelled', 'skipped', 'error']);
+// Statuts éligibles côté records (= leads qu'on a vu passer côté nous).
+// 'j1-manual-pending' = leads traités par notre pipeline mais sans envoi auto
+// (J1_AUTO_SEND_DISABLED=true) ; Norman a fait l'action manuelle.
+const J15_ELIGIBLE_STATUSES = new Set(['sent', 'cancelled', 'skipped', 'error', 'j1-manual-pending']);
 
 function isJ15Candidate(record, now) {
-  if (record.j15Sent) return false;
+  if ((record.j15Relances || 0) >= 3) return false; // max atteint
   if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false;
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
   const refMs = new Date(record.receivedAt || record.processedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
-  return ageDays >= CONFIG.J15_DELAY_DAYS;
+  if (ageDays > 90) return false; // trop vieux, on abandonne
+  return true;
 }
 
-function buildJ15Email(firstName, programName) {
-  const subject = `Toujours intéressé(e) par ${programName} ?`;
+// ─── Templates email règle 3 (3 jours : J+15 / J+16 / J+17) ─────────────────
+
+function buildJ15Day1Email(firstName, programName) {
+  const subject = `${programName} — votre dossier toujours actif ?`;
   const html = `<p>Bonjour ${firstName},</p>
-<p>Je reviens vers vous concernant votre demande sur ${programName}, déposée il y a quelques semaines.</p>
-<p>Sans nouvelles, je voulais m'assurer que votre projet immobilier est toujours d'actualité. Depuis votre première demande quelques lots se sont libérés et il reste des opportunités intéressantes selon votre budget et votre recherche.</p>
-<p>N'hésitez pas à me répondre directement à ce mail avec vos critères d'acquisition, je pourrai vous envoyer les plans et les prix.</p>
-<p>Souhaitez-vous qu'on prenne 10 minutes au téléphone cette semaine ? Vous pouvez réserver un créneau directement ici :<br/>
-<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
-<p>Au plaisir d'échanger,<br/>
+<p>Cela fait maintenant 2 semaines que je tentais de vous joindre concernant votre demande sur ${programName}. Je n'ai pas eu votre retour à mes messages précédents.</p>
+<p>Avant de classer définitivement votre dossier, je souhaitais m'assurer qu'on ne passait pas à côté d'une opportunité pour vous. Le programme évolue toujours et il reste actuellement des biens disponibles.</p>
+<p>Un mot de vous suffit pour que je vous transmette les éléments à jour.</p>
+<p>Très cordialement,<br/>
+Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+function buildJ15Day2Fallback(firstName, programName) {
+  // Fallback email pour J+16 si le template WhatsApp Meta n'est pas approuvé
+  // ou si on n'a pas de téléphone. Reprend le wording WhatsApp validé.
+  const subject = `${programName} — quelques disponibilités à étudier`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Je reviens une dernière fois vers vous concernant votre demande sur ${programName}.</p>
+<p>Notre stock évolue rapidement, et les meilleures opportunités partent vite. Si votre projet reste d'actualité, je peux vous transmettre les disponibilités à jour aujourd'hui.</p>
+<p>Souhaitez-vous que je vous rappelle ?</p>
+<p>Norman DADON<br/>
+—<br/>
+Catella Residential — Logement neuf</p>`;
+  return { subject, html };
+}
+
+function buildJ15Day3Email(firstName, programName) {
+  const subject = `${programName} — clôture de votre dossier`;
+  const html = `<p>Bonjour ${firstName},</p>
+<p>Sans nouvelles de votre part malgré mes différentes tentatives, je vais clôturer définitivement votre dossier sur ${programName} aujourd'hui.</p>
+<p>Si votre projet immobilier évolue dans les semaines à venir et que vous souhaitez revoir ce programme ou d'autres opportunités de notre portefeuille, n'hésitez pas à me recontacter directement à cette adresse.</p>
+<p>Je vous souhaite une bonne continuation dans vos recherches.</p>
+<p>Cordialement,<br/>
 Norman DADON<br/>
 —<br/>
 Catella Residential — Logement neuf</p>`;
@@ -2941,81 +3002,113 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   const lead = await fetchLead(record.leadId, { programId: record.programId });
   if (!lead) return { skipped: true, reason: 'lead introuvable côté Adlead' };
   if (lead.is_under_prescription === true) return { skipped: true, reason: 'is_under_prescription=true' };
-  if (lead.status !== 'pending')           return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)` };
 
-  const now = Date.now();
-  const cutoff = now - CONFIG.J15_DELAY_DAYS * 24 * 60 * 60 * 1000;
-  if (lead.last_interaction_at) {
-    const liMs = new Date(lead.last_interaction_at).getTime();
-    if (liMs > cutoff) return { skipped: true, reason: `last_interaction_at trop récent (${lead.last_interaction_at})` };
+  // Status check — règle Option A : si status ≠ pending, reset counter et skip.
+  if (lead.status !== 'pending') {
+    let reset = false;
+    if ((record.j15Relances || 0) > 0) {
+      if (!dryRun) record.j15Relances = 0;
+      reset = true;
+    }
+    return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)`, reset };
   }
 
+  // Trigger via Adlead `last_interaction_at` (date dernière action commerciale).
+  // Cadence J+15 / J+16 / J+17 depuis cette date :
+  //   counter=0 + days>=15 → send #1 (soft last-chance)
+  //   counter=1 + days>=16 → send #2 (urgence stock — WhatsApp)
+  //   counter=2 + days>=17 → send #3 (clôture définitive)
+  if (!lead.last_interaction_at) {
+    return { skipped: true, reason: 'last_interaction_at null — pas de référence' };
+  }
+  const daysSinceLastAction = (Date.now() - new Date(lead.last_interaction_at).getTime()) / (1000 * 60 * 60 * 24);
+  const currentCount = record.j15Relances || 0;
+  let dayNumber;
+  if (currentCount === 0 && daysSinceLastAction >= 15) dayNumber = 1;
+  else if (currentCount === 1 && daysSinceLastAction >= 16) dayNumber = 2;
+  else if (currentCount === 2 && daysSinceLastAction >= 17) dayNumber = 3;
+  else {
+    return {
+      skipped: true,
+      reason: `pas de relance prévue (j15Relances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)})`,
+    };
+  }
+
+  // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;
   if (!contact) return { skipped: true, reason: 'aucun contact sur le lead' };
   const email = contact.email || record.email;
   if (!email) return { skipped: true, reason: "pas d'email sur le contact" };
   if (contact.has_opted_out === true || contact.opted_out_at) return { skipped: true, reason: 'contact opt-out' };
 
-  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
-
-  // Résolution robuste du programName : on REJETTE le fallback "Programme #XXX"
-  // qui peut traîner dans record.programName (posé en J+1 quand l'API Adlead
-  // n'avait pas renvoyé le nom du programme). On retente via fetchProgram pour
-  // avoir un vrai nom — et si toujours rien, on SKIP plutôt que d'envoyer un
-  // mail au sujet "Toujours intéressé par Programme #611 ?" (très peu pro).
+  // Résolution robuste du programName — refus du fallback "Programme #XXX".
   const BAD_NAME = /^Programme #\d+$/;
   let programName = record.programName;
   if (!programName || BAD_NAME.test(programName)) {
     programName = lead.program?.name || lead.program?.nom_commercial || null;
   }
   if (!programName || BAD_NAME.test(programName)) {
-    try {
-      const prog = await fetchProgram(record.programId);
-      programName = prog?.name || prog?.nom_commercial || null;
-    } catch (_) {}
+    try { const prog = await fetchProgram(record.programId); programName = prog?.name || prog?.nom_commercial || null; }
+    catch (_) {}
   }
   if (!programName || BAD_NAME.test(programName)) {
     return { skipped: true, reason: `programme non résolu (programId=${record.programId})` };
   }
 
-  const { subject, html } = buildJ15Email(firstName, programName);
+  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
 
-  // GATE CRITIQUE — en mode dry-run OU si kill switch sends actif, on retourne
-  // le verdict sans appeler sendEmail/sendWhatsApp. C'est la SEULE manière
-  // correcte de prouver qu'un dry-run n'envoie rien. Voir incident 2026-05-15.
+  // Determine channel + content selon le jour. Pattern E/W/E.
+  let channel, subject = null, html = null, whatsappTo = null;
+  if (dayNumber === 1) {
+    channel = 'email';
+    ({ subject, html } = buildJ15Day1Email(firstName, programName));
+  } else if (dayNumber === 2) {
+    if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_J16) {
+      channel = 'whatsapp';
+      whatsappTo = normalizePhoneE164(contact.phone || record.whatsappTo);
+    } else {
+      // Fallback email si template Meta J+16 pas dispo (ou WhatsApp J+15 désactivé).
+      channel = 'email-fallback';
+      ({ subject, html } = buildJ15Day2Fallback(firstName, programName));
+    }
+  } else { // dayNumber === 3
+    channel = 'email';
+    ({ subject, html } = buildJ15Day3Email(firstName, programName));
+  }
+
+  // GATE — dry-run ou kill switch → return without sending (cf incident 2026-05-15).
   if (dryRun || sendDisabled) {
     return {
-      sent: true,           // would-have-sent
-      email, subject,
-      dryRun: !!dryRun,
-      sendDisabled: !!sendDisabled,
+      sent: true,
+      dayNumber, channel, email, subject, whatsappTo,
+      dryRun: !!dryRun, sendDisabled: !!sendDisabled,
     };
   }
 
-  let emailError = null, whatsappSid = null, whatsappError = null, whatsappTo = null;
-  try {
-    await sendEmailViaPowerAutomate(email, subject, html);
-  } catch (e) {
-    emailError = e.message;
-  }
-
-  if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_RELANCE_J15) {
-    const phone = contact.phone || record.whatsappTo;
-    whatsappTo = normalizePhoneE164(phone);
+  // Envoi réel.
+  let emailError = null, whatsappSid = null, whatsappError = null;
+  if (channel === 'email' || channel === 'email-fallback') {
+    try { await sendEmailViaPowerAutomate(email, subject, html); }
+    catch (e) { emailError = e.message; }
+  } else if (channel === 'whatsapp') {
     if (whatsappTo) {
       try {
         const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
-          templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J15,
+          templateSid: CONFIG.TWILIO_TEMPLATE_J16,
           contentVariables: { '1': firstName, '2': programName },
         });
         whatsappSid = r?.sid || null;
-      } catch (e) {
-        whatsappError = e.message;
-      }
+      } catch (e) { whatsappError = e.message; }
+    } else {
+      whatsappError = 'no valid phone';
     }
   }
 
-  return { sent: true, email, subject, emailError, whatsappTo, whatsappSid, whatsappError };
+  return {
+    sent: true,
+    dayNumber, channel, email, subject, whatsappTo,
+    emailError, whatsappSid, whatsappError,
+  };
 }
 
 // Throttle pour respecter le rate limit Adlead (60 req/min).
@@ -3064,18 +3157,24 @@ async function j15Tick({ dryRun = false } = {}) {
         });
         results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
         if (result.sent && !dryRun) {
-          record.j15Sent = true;
-          record.j15SentAt = new Date().toISOString();
-          record.j15Email = result.email;
-          record.j15Subject = result.subject;
-          record.j15EmailError = result.emailError;
-          record.j15WhatsappTo = result.whatsappTo;
-          record.j15WhatsappSid = result.whatsappSid;
-          record.j15WhatsappError = result.whatsappError;
+          // Incrément counter + history (cadence 3 jours = j15Relances 0→3).
+          record.j15Relances = (record.j15Relances || 0) + 1;
+          record.j15History = record.j15History || [];
+          record.j15History.push({
+            day: result.dayNumber,
+            channel: result.channel,
+            sentAt: new Date().toISOString(),
+            email: result.email,
+            subject: result.subject,
+            emailError: result.emailError || null,
+            whatsappSid: result.whatsappSid || null,
+            whatsappError: result.whatsappError || null,
+          });
           // CRITIQUE : save APRÈS CHAQUE envoi pour ne pas perdre l'idempotence
-          // si le tick crashe ou est killé en plein vol. Sinon les leads déjà
-          // touchés seront re-spammés au tick suivant. Voir incident 2026-05-15.
+          // si le tick crashe ou est killé en plein vol. Voir incident 2026-05-15.
           saveProcessed();
+        } else if (result.reset && !dryRun) {
+          saveProcessed(); // reset du counter → persist
         }
       } catch (e) {
         console.error(`[j15] lead ${record.leadId} erreur:`, e.message);
@@ -3211,43 +3310,39 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     return { skipped: true, reason: 'is_under_prescription=true' };
   }
 
-  // Status check — règle Option A : si status ≠ pending, on reset et on stop.
+  // Status check — règle Option A : si status ≠ pending, on reset le counter
+  // (cycle stoppé) et on skip. Si status revient à pending plus tard, le cycle
+  // recommence depuis #1 (frais).
   if (lead.status !== 'pending') {
     let reset = false;
-    if (record.pendingSince || (record.j3mRelances || 0) > 0) {
-      if (!dryRun) {
-        record.pendingSince = null;
-        record.j3mRelances = 0;
-      }
+    if ((record.j3mRelances || 0) > 0) {
+      if (!dryRun) record.j3mRelances = 0;
       reset = true;
     }
     return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)`, reset };
   }
 
-  // Première détection du status pending → on note pendingSince, on n'envoie pas.
-  if (!record.pendingSince) {
-    const nowIso = new Date().toISOString();
-    if (!dryRun) record.pendingSince = nowIso;
+  // Trigger via Adlead `last_interaction_at` = date de la dernière action commerciale
+  // (typiquement la pose manuelle de Norman "Mail envoyé" / "Appel non abouti").
+  // Cadence J+3 / J+4 / J+5 depuis cette date :
+  //   counter=0 + daysSinceLastAction >= 3 → send #1 (doux)
+  //   counter=1 + daysSinceLastAction >= 4 → send #2 (moyen)
+  //   counter=2 + daysSinceLastAction >= 5 → send #3 (final)
+  if (!lead.last_interaction_at) {
+    return { skipped: true, reason: 'last_interaction_at null — pas de référence pour le décompte' };
+  }
+  const daysSinceLastAction = (Date.now() - new Date(lead.last_interaction_at).getTime()) / (1000 * 60 * 60 * 24);
+  const currentCount = record.j3mRelances || 0;
+  let dayNumber;
+  if (currentCount === 0 && daysSinceLastAction >= 3) dayNumber = 1;
+  else if (currentCount === 1 && daysSinceLastAction >= 4) dayNumber = 2;
+  else if (currentCount === 2 && daysSinceLastAction >= 5) dayNumber = 3;
+  else {
     return {
       skipped: true,
-      reason: 'pendingSince noté, première détection — 24h d\'attente avant relance',
-      pendingSinceSet: nowIso,
+      reason: `pas de relance prévue (j3mRelances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)})`,
     };
   }
-
-  // 24h wait depuis pendingSince.
-  const pendingMs = new Date(record.pendingSince).getTime();
-  const ageHours = (Date.now() - pendingMs) / (1000 * 60 * 60);
-  if (ageHours < 24) {
-    return { skipped: true, reason: `pending depuis seulement ${ageHours.toFixed(1)}h, attente 24h min` };
-  }
-
-  // Max 3 relances.
-  const currentCount = record.j3mRelances || 0;
-  if (currentCount >= 3) {
-    return { skipped: true, reason: 'max 3 relances atteintes' };
-  }
-  const dayNumber = currentCount + 1; // 1, 2, ou 3
 
   // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;
