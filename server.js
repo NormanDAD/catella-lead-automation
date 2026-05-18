@@ -292,6 +292,27 @@ if (_dirCheck.ok) {
 let pendingLeads = loadJsonFile(PENDING_FILE, []);
 let processedLeads = loadJsonFile(PROCESSED_FILE, []);
 
+// Cache global programId → nom propre. Source 1 : processedLeads avec name
+// résolu (rempli au boot). Source 2 : fetchProgram à la demande via endpoint
+// admin /api/admin/resolve-program-names. Utilisé par /api/pending et /api/leads
+// pour ne plus afficher "Programme #XXX" dans le dashboard.
+const programNameCache = new Map();
+function prefetchProgramNameCacheFromProcessed() {
+  const BAD = /^Programme #\d+$/;
+  let added = 0;
+  for (const r of processedLeads) {
+    if (r.programId && r.programName && !BAD.test(r.programName)) {
+      const key = String(r.programId);
+      if (!programNameCache.has(key)) {
+        programNameCache.set(key, r.programName);
+        added++;
+      }
+    }
+  }
+  console.log(`[programNameCache] ${added} programmes mis en cache au boot (depuis ${processedLeads.length} processedLeads)`);
+}
+prefetchProgramNameCacheFromProcessed();
+
 // ─── INBOX WATCHER (réponses prospect) ──────────────────────────────────────
 // Initialisé ici (après DATA_DIR check) — le module gère son propre state en JSON
 // dans DATA_DIR/relance_tracking.json + replies_processed.json + graph-token.json.
@@ -1697,11 +1718,26 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/leads', (req, res) => {
-  res.json(processedLeads.slice().reverse());
+  // Enrichissement programName : si record.programName est manquant ou
+  // matche le fallback "Programme #XXX", on remplace par le cache si dispo.
+  // Sinon on laisse tel quel.
+  const BAD = /^Programme #\d+$/;
+  const enriched = processedLeads.slice().reverse().map(r => {
+    const needsResolve = !r.programName || BAD.test(r.programName);
+    if (!needsResolve) return r;
+    const cached = programNameCache.get(String(r.programId));
+    return cached ? { ...r, programName: cached } : r;
+  });
+  res.json(enriched);
 });
 
 app.get('/api/pending', (req, res) => {
-  res.json(pendingLeads.slice().reverse());
+  // Enrichissement programName via le cache global (cf programNameCache plus bas).
+  const enriched = pendingLeads.slice().reverse().map(p => ({
+    ...p,
+    programName: programNameCache.get(String(p.programId)) || null,
+  }));
+  res.json(enriched);
 });
 
 // ─── ADMIN : vider la file pending ─────────────────────────────────────────
@@ -2208,6 +2244,51 @@ app.post('/api/admin/rehydrate-j1-manual-pending', (req, res) => {
     removedFromProcessed: removed,
     pendingNow: pendingLeads.length,
     message: `${count} leads ré-injectés en queue. Scheduler les traitera au prochain tick (≤5 min).`,
+  });
+});
+
+// Admin : batch-résolution des programNames inconnus côté Adlead.
+// Itère sur les programIds uniques avec un fallback "Programme #XXX" dans
+// processedLeads/pendingLeads, appelle fetchProgram pour chaque, peuple le
+// cache. Throttle 1.1s entre chaque pour respecter rate limit Adlead.
+// Idempotent — peut être rappelé sans risque.
+app.post('/api/admin/resolve-program-names', async (req, res) => {
+  const BAD = /^Programme #\d+$/;
+  const unknownIds = new Set();
+  // Collecte les programIds qui n'ont pas encore de nom propre dans le cache.
+  for (const r of [...processedLeads, ...pendingLeads]) {
+    if (!r.programId) continue;
+    const key = String(r.programId);
+    if (programNameCache.has(key)) continue;
+    if (r.programName && !BAD.test(r.programName)) continue; // déjà propre
+    unknownIds.add(key);
+  }
+  const ids = [...unknownIds];
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  let resolved = 0, stillUnknown = 0, errors = 0;
+  for (let i = 0; i < ids.length; i++) {
+    if (i > 0) await sleep(1100); // throttle Adlead
+    const id = ids[i];
+    try {
+      const prog = await fetchProgram(id);
+      const name = prog?.name || prog?.nom_commercial || null;
+      if (name) {
+        programNameCache.set(id, name);
+        resolved++;
+      } else {
+        stillUnknown++;
+      }
+    } catch (e) {
+      errors++;
+      console.error(`[resolve-program-names] ${id} échec:`, e.message);
+    }
+  }
+  res.json({
+    totalUnique: ids.length,
+    resolved,
+    stillUnknown,
+    errors,
+    cacheSize: programNameCache.size,
   });
 });
 
