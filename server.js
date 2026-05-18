@@ -3156,8 +3156,12 @@ async function j15Tick({ dryRun = false } = {}) {
           sendDisabled: CONFIG.J15_SEND_DISABLED,
         });
         results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
-        if (result.sent && !dryRun) {
-          // Incrément counter + history (cadence 3 jours = j15Relances 0→3).
+        // CRITIQUE : on n'incrémente le counter QUE si on a vraiment envoyé.
+        // sendDisabled est un kill switch qui doit se comporter comme dryRun
+        // pour l'état (pas de mutation). Sinon le cron en mode "Phase A safe"
+        // fait avancer les compteurs sans envoyer → à la fin tous les leads
+        // sont "max=3" et plus rien ne part quand on flip sendDisabled=false.
+        if (result.sent && !dryRun && !result.sendDisabled) {
           record.j15Relances = (record.j15Relances || 0) + 1;
           record.j15History = record.j15History || [];
           record.j15History.push({
@@ -3170,8 +3174,6 @@ async function j15Tick({ dryRun = false } = {}) {
             whatsappSid: result.whatsappSid || null,
             whatsappError: result.whatsappError || null,
           });
-          // CRITIQUE : save APRÈS CHAQUE envoi pour ne pas perdre l'idempotence
-          // si le tick crashe ou est killé en plein vol. Voir incident 2026-05-15.
           saveProcessed();
         } else if (result.reset && !dryRun) {
           saveProcessed(); // reset du counter → persist
@@ -3462,8 +3464,10 @@ async function j3mTick({ dryRun = false } = {}) {
         });
         results.push({ leadId: record.leadId, programId: record.programId, programName: record.programName, ...result });
         if (!dryRun) {
-          // Sauvegarde immédiate après chaque envoi (cf incident 2026-05-15).
-          if (result.sent) {
+          // CRITIQUE : on n'incrémente le counter QUE si on a vraiment envoyé.
+          // sendDisabled doit se comporter comme dryRun pour l'état sinon
+          // les counters avancent sans envoi → max=3 → plus rien ne part.
+          if (result.sent && !result.sendDisabled) {
             record.j3mRelances = (record.j3mRelances || 0) + 1;
             record.j3mHistory = record.j3mHistory || [];
             record.j3mHistory.push({
@@ -3475,8 +3479,7 @@ async function j3mTick({ dryRun = false } = {}) {
               whatsappError: result.whatsappError || null,
             });
             saveProcessed();
-          } else if (result.reset || result.pendingSinceSet) {
-            // État muté (pendingSince posé ou reset) → flag pour save final.
+          } else if (result.reset) {
             stateChangedNoSend = true;
           }
         }
