@@ -89,6 +89,11 @@ const CONFIG = {
   J1_AUTO_SEND_DISABLED: process.env.J1_AUTO_SEND_DISABLED === 'true',
   // ContentSid Twilio du template Meta "relance_j16_catella" (jour 2 de règle 3)
   TWILIO_TEMPLATE_J16:   process.env.TWILIO_TEMPLATE_J16 || '',
+  // ── Fenêtre horaire d'envoi ──────────────────────────────────────────────
+  // Règle Norman : aucun envoi à un prospect en dehors de 9h-20h Paris,
+  // et aucun envoi le dimanche (toute la journée). Voir isWithinAllowedSendHours().
+  SEND_HOUR_START_PARIS: Number(process.env.SEND_HOUR_START_PARIS || 9),   // 9h inclus
+  SEND_HOUR_END_PARIS:   Number(process.env.SEND_HOUR_END_PARIS   || 20),  // 20h exclu
   // ── Relance J+3 du matin (3 jours consécutifs après passage en "pending") ──
   // Cron quotidien à 9h15 Paris qui relance les leads dont le statut Adlead
   // est passé à "pending" depuis ≥24h, avec 3 messages d'escalation :
@@ -1433,6 +1438,17 @@ async function processPendingLead(entry) {
         programName,
         note: 'Auto-send désactivé via J1_AUTO_SEND_DISABLED — à traiter manuellement (mail + WhatsApp + actions Adlead)',
       });
+    }
+
+    // Gate fenêtre horaire (règle Norman 2026-05-18) — pas d'envoi prospect
+    // hors 9h-20h Paris ni le dimanche. On NE finalize PAS : le lead reste
+    // en queue avec un checkAt repoussé à la prochaine fenêtre valide.
+    if (!isWithinAllowedSendHours()) {
+      const next = computeNextAllowedSendTime();
+      console.log(`[process] hors fenêtre 9h-20h Paris (ou dimanche) → report lead ${entry.leadId} jusqu'à ${next.toISOString()}`);
+      entry.checkAt = next.toISOString();
+      savePending();
+      return; // ne pas finalize, reste en queue
     }
 
     // Lookup programme dans programmes.json (keyé par nom) → accroche personnalisée
@@ -3057,6 +3073,12 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
 
   const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
 
+  // Gate fenêtre horaire (règle Norman 2026-05-18) — pas d'envoi hors 9h-20h
+  // Paris ni le dimanche. Skip sans incrémenter counter → re-tenté demain.
+  if (!isWithinAllowedSendHours()) {
+    return { skipped: true, reason: 'hors fenêtre 9h-20h Paris (ou dimanche)' };
+  }
+
   // Determine channel + content selon le jour. Pattern E/W/E.
   let channel, subject = null, html = null, whatsappTo = null;
   if (dayNumber === 1) {
@@ -3203,6 +3225,50 @@ async function j15Tick({ dryRun = false } = {}) {
 }
 
 let lastJ15RunYmd = null;
+// ─── HELPERS FENÊTRE HORAIRE PARIS (règle Norman 2026-05-18) ───────────────
+// Pas d'envoi prospect en dehors de 9h-20h Paris. Dimanche entier exclu.
+// `testNow` (optionnel) permet de mocker l'heure pour les tests unitaires.
+
+function isWithinAllowedSendHours(testNow) {
+  const now = testNow
+    || (process.env.TEST_FORCE_NOW_ISO ? new Date(process.env.TEST_FORCE_NOW_ISO) : new Date());
+  // toLocaleString avec timeZone donne l'heure Paris ; on la re-parse pour
+  // extraire jour de la semaine + heure de manière déterministe.
+  const parisStr = now.toLocaleString('en-US', { timeZone: 'Europe/Paris' });
+  const parisDate = new Date(parisStr);
+  const day = parisDate.getDay();      // 0 = dimanche
+  const hour = parisDate.getHours();
+  if (day === 0) return false;          // dimanche : blocage toute la journée
+  return hour >= CONFIG.SEND_HOUR_START_PARIS && hour < CONFIG.SEND_HOUR_END_PARIS;
+}
+
+// Calcule la prochaine date/heure valide pour envoi (utile pour reporter
+// le checkAt d'un lead en queue qu'on n'a pas pu traiter à cause de la fenêtre).
+function computeNextAllowedSendTime(testNow) {
+  const now = testNow || new Date();
+  const parisStr = now.toLocaleString('en-US', { timeZone: 'Europe/Paris' });
+  let parisDate = new Date(parisStr);
+  const startH = CONFIG.SEND_HOUR_START_PARIS;
+  const endH = CONFIG.SEND_HOUR_END_PARIS;
+  // Si on est avant 9h aujourd'hui (et pas dimanche) → setter à 9h aujourd'hui.
+  // Si on est après 20h ou dimanche → setter à 9h le prochain jour valide.
+  if (parisDate.getDay() !== 0 && parisDate.getHours() < startH) {
+    parisDate.setHours(startH, 0, 0, 0);
+  } else {
+    // Avance d'un jour
+    parisDate.setDate(parisDate.getDate() + 1);
+    parisDate.setHours(startH, 0, 0, 0);
+    // Si on tombe sur dimanche → encore +1 jour
+    while (parisDate.getDay() === 0) {
+      parisDate.setDate(parisDate.getDate() + 1);
+    }
+  }
+  // parisDate est dans le fuseau local du process. On veut le ramener en UTC.
+  // Hack : on calcule l'offset Paris au moment courant et on l'applique.
+  const offsetMs = parisDate.getTime() - new Date(parisDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+  return new Date(parisDate.getTime() - offsetMs);
+}
+
 function getParisYmdAndHour() {
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Paris',
@@ -3368,6 +3434,12 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   }
 
   const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
+
+  // Gate fenêtre horaire (règle Norman 2026-05-18) — pas d'envoi hors 9h-20h
+  // Paris ni le dimanche. Skip sans incrémenter counter → re-tenté demain.
+  if (!isWithinAllowedSendHours()) {
+    return { skipped: true, reason: 'hors fenêtre 9h-20h Paris (ou dimanche)' };
+  }
 
   // Determine channel + content pour ce jour.
   let channel, subject = null, html = null, whatsappTo = null;

@@ -44,6 +44,8 @@ process.env.PIPELINE_DISABLED = 'true';
 process.env.TELEGRAM_NOTIF_ENABLED = 'false';
 process.env.SKIP_REGISTRATIONS_CHECK = 'true';
 process.env.REPLY_HANDLER_ENABLED = 'false';
+// Force le temps de test sur Mardi 12h00 UTC = 14h00 Paris (mardi, fenêtre OK).
+process.env.TEST_FORCE_NOW_ISO = '2026-05-19T12:00:00Z';
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 const dir = process.env.DATA_DIR;
@@ -222,6 +224,27 @@ require(path.resolve(__dirname, 'server.js'));
   else fail(`Twilio ${outboundCalls.twilio}× en dry-run`);
   if (outboundCalls.powerAutomate === 0) pass('0 hit Power Automate (gate dry-run OK)');
   else fail(`Power Automate ${outboundCalls.powerAutomate}× en dry-run`);
+
+  // === GATE FENÊTRE HORAIRE — Mardi 22h Paris → tous les eligibles doivent skip "hors fenêtre" ===
+  console.log('\n=== TEST gate fenêtre horaire (Mardi 22h Paris) ===');
+  process.env.TEST_FORCE_NOW_ISO = '2026-05-19T20:00:00Z'; // 22h Paris (UTC+2)
+  r = await fetch(`http://localhost:${TEST_PORT}/api/test/j3m-dry-run`);
+  j = await r.json();
+  const lead101After = j.results.find(x => x.leadId === 101);
+  if (lead101After && lead101After.skipped && /hors fenêtre/.test(lead101After.reason || '')) pass('Lead 101 (would-have-sent en window) → skip "hors fenêtre" à 22h Paris');
+  else fail(`Lead 101 à 22h: ${JSON.stringify(lead101After)}`);
+
+  // === GATE DIMANCHE — Dimanche 14h Paris → blocage toute la journée ===
+  console.log('\n=== TEST gate dimanche (Dimanche 14h Paris) ===');
+  process.env.TEST_FORCE_NOW_ISO = '2026-05-17T12:00:00Z'; // Dimanche 14h Paris
+  r = await fetch(`http://localhost:${TEST_PORT}/api/test/j15-dry-run`);
+  j = await r.json();
+  const lead201After = j.results.find(x => x.leadId === 201);
+  if (lead201After && lead201After.skipped && /hors fenêtre/.test(lead201After.reason || '')) pass('Lead 201 (J+15 in window) → skip "hors fenêtre" dimanche');
+  else fail(`Lead 201 dimanche: ${JSON.stringify(lead201After)}`);
+
+  // Restore time pour reste éventuel.
+  process.env.TEST_FORCE_NOW_ISO = '2026-05-19T12:00:00Z';
 
   console.log(ok ? '\n✅ ALL TESTS PASSED' : '\n❌ TESTS FAILED');
   process.exit(ok ? 0 : 1);
