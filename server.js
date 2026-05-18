@@ -2172,6 +2172,45 @@ app.post('/api/admin/register-test-relance', (req, res) => {
   }
 });
 
+// Admin : ré-injecte les leads finalisés en 'j1-manual-pending' dans la queue
+// pendingLeads pour qu'ils soient traités par le scheduler au prochain tick.
+// À appeler après bascule J1_AUTO_SEND_DISABLED=true → false. Idempotent (peut
+// être rappelé sans risque, ne fait rien s'il n'y a plus de j1-manual-pending).
+app.post('/api/admin/rehydrate-j1-manual-pending', (req, res) => {
+  const toRehydrate = processedLeads.filter(r => r.status === 'j1-manual-pending');
+  const count = toRehydrate.length;
+  const nowIso = new Date().toISOString();
+  for (const r of toRehydrate) {
+    pendingLeads.push({
+      interestId: r.interestId || r.id,
+      leadId: r.leadId,
+      programId: r.programId,
+      receivedAt: r.receivedAt || nowIso,
+      checkAt: nowIso, // traité au prochain tick scheduler
+      attempts: 0,
+      maxAttempts: 3,
+      rehydratedFrom: 'j1-manual-pending',
+      rehydratedAt: nowIso,
+    });
+  }
+  // Filter out from processedLeads (parcours arrière pour splice safe).
+  const before = processedLeads.length;
+  for (let i = processedLeads.length - 1; i >= 0; i--) {
+    if (processedLeads[i].status === 'j1-manual-pending') {
+      processedLeads.splice(i, 1);
+    }
+  }
+  const removed = before - processedLeads.length;
+  savePending();
+  saveProcessed();
+  res.json({
+    rehydrated: count,
+    removedFromProcessed: removed,
+    pendingNow: pendingLeads.length,
+    message: `${count} leads ré-injectés en queue. Scheduler les traitera au prochain tick (≤5 min).`,
+  });
+});
+
 // Admin EMERGENCY : marque tous les records dont programName matche
 // /^Programme #\d+$/ comme j15Sent=true. À appeler une fois après l'incident
 // 2026-05-15 pour empêcher tout futur tick J+15 de re-spammer ces leads avec
