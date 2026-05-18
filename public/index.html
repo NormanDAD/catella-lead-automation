@@ -98,10 +98,166 @@
     padding: 20px;
     border: 1px solid var(--border);
     transition: transform 0.2s, box-shadow 0.2s;
+    position: relative;
   }
   .kpi-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+  }
+  .kpi-card.clickable {
+    cursor: pointer;
+  }
+  .kpi-card.clickable:hover {
+    border-color: var(--blue);
+  }
+
+  /* Info icon (i) avec tooltip au survol */
+  .info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--border);
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    font-family: serif;
+    cursor: help;
+    margin-left: 6px;
+    vertical-align: middle;
+    position: relative;
+  }
+  .info-icon::after {
+    content: attr(data-info);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--text);
+    color: white;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    font-family: -apple-system, sans-serif;
+    white-space: normal;
+    width: 260px;
+    text-align: left;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    z-index: 100;
+    line-height: 1.5;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+  }
+  .info-icon::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: var(--text);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    z-index: 100;
+  }
+  .info-icon:hover::after,
+  .info-icon:hover::before {
+    opacity: 1;
+  }
+
+  /* Modal liste leads */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 1000;
+    padding: 40px 20px;
+    overflow-y: auto;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 1100px;
+    width: 100%;
+    max-height: calc(100vh - 80px);
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .modal-title {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .modal-subtitle {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+  .modal-close {
+    background: var(--border);
+    border: none;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--text);
+  }
+  .modal-close:hover { background: var(--catella-red); color: white; }
+  .modal-body {
+    overflow-y: auto;
+    flex: 1;
+  }
+  .modal-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .modal-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg);
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+  }
+  .modal-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-table tr:hover { background: var(--bg); }
+  .modal-table a {
+    color: var(--blue);
+    text-decoration: none;
+    font-weight: 500;
+  }
+  .modal-table a:hover { text-decoration: underline; }
+  .modal-empty {
+    text-align: center;
+    color: var(--text-dim);
+    padding: 40px;
+    font-size: 14px;
   }
   .kpi-label {
     font-size: 12px;
@@ -442,53 +598,58 @@
 
   <!-- KPIs -->
   <div class="kpi-grid">
-    <div class="kpi-card accent-blue">
-      <div class="kpi-label">En attente</div>
+    <div class="kpi-card accent-blue clickable" onclick="openModal('pending')">
+      <div class="kpi-label">En attente<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads reçus par webhook Adlead et en file d'attente, pas encore traités par le pipeline. Délai par défaut = 24h après l'arrivée du lead (immédiat pour les programmes INSTANT). Click pour voir la liste.">i</span></div>
       <div class="kpi-value" id="kpi-pending">—</div>
       <div class="kpi-delta">Leads à traiter (&lt; 24 h)</div>
     </div>
-    <div class="kpi-card accent-green">
-      <div class="kpi-label">Envoyés aujourd'hui</div>
+    <div class="kpi-card accent-green clickable" onclick="openModal('today')">
+      <div class="kpi-label">Envoyés aujourd'hui<span class="info-icon" onclick="event.stopPropagation()" data-info="Nombre de mails J+1 partis aux prospects aujourd'hui (jour calendaire courant, fuseau Paris). Inclut uniquement les envois auto-pipeline. Click pour voir le détail.">i</span></div>
       <div class="kpi-value" id="kpi-today">—</div>
       <div class="kpi-delta" id="kpi-today-sub">—</div>
     </div>
-    <div class="kpi-card accent-red">
-      <div class="kpi-label">Cette semaine</div>
+    <div class="kpi-card accent-red clickable" onclick="openModal('week')">
+      <div class="kpi-label">Cette semaine<span class="info-icon" onclick="event.stopPropagation()" data-info="Total des mails J+1 partis sur les 7 derniers jours glissants. Pratique pour voir la tendance vs la semaine précédente.">i</span></div>
       <div class="kpi-value" id="kpi-week">—</div>
       <div class="kpi-delta">7 derniers jours</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Commercial a pris la main</div>
+    <div class="kpi-card clickable" onclick="openModal('cancelled')">
+      <div class="kpi-label">Commercial a pris la main<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads où le commercial direct a déjà agi dans Adlead avant que notre pipeline ne fasse son J+1 (statut interest ≠ to-process). On les annule pour ne pas doublonner. Click pour la liste.">i</span></div>
       <div class="kpi-value" id="kpi-cancelled">—</div>
       <div class="kpi-delta">Statut ≠ to-process avant J+1</div>
     </div>
-    <div class="kpi-card accent-orange">
-      <div class="kpi-label">Opt-out</div>
+    <div class="kpi-card accent-orange clickable" onclick="openModal('optout')">
+      <div class="kpi-label">Opt-out<span class="info-icon" onclick="event.stopPropagation()" data-info="Contacts qui se sont désinscrits (has_opted_out=true sur Adlead). Aucun mail ni WhatsApp ne leur est envoyé par notre pipeline.">i</span></div>
       <div class="kpi-value" id="kpi-optout">—</div>
       <div class="kpi-delta">Désinscriptions</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Total traité</div>
+    <div class="kpi-card clickable" onclick="openModal('total')">
+      <div class="kpi-label">Total traité<span class="info-icon" onclick="event.stopPropagation()" data-info="Total des leads passés par le pipeline depuis le démarrage (toutes catégories confondues : sent, cancelled, optout, denounced, skipped, error, j1-manual-pending).">i</span></div>
       <div class="kpi-value" id="kpi-total">—</div>
       <div class="kpi-delta" id="kpi-prog-count">—</div>
     </div>
-    <div class="kpi-card accent-green">
-      <div class="kpi-label">WhatsApp aujourd'hui</div>
+    <div class="kpi-card accent-green clickable" onclick="openModal('whatsapp-today')">
+      <div class="kpi-label">WhatsApp aujourd'hui<span class="info-icon" onclick="event.stopPropagation()" data-info="Mails J+1 doublés d'un envoi WhatsApp via Twilio aujourd'hui. Compte uniquement les WhatsApp acceptés par Twilio (whatsappSid non null).">i</span></div>
       <div class="kpi-value" id="kpi-whatsapp-today">—</div>
       <div class="kpi-delta" id="kpi-whatsapp-sub">—</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Leads dénoncés</div>
+    <div class="kpi-card accent-green clickable" onclick="openModal('whatsapp-replies')">
+      <div class="kpi-label">Réponses WhatsApp<span class="info-icon" onclick="event.stopPropagation()" data-info="Réponses reçues des prospects sur WhatsApp (via webhook Twilio). Tu reçois aussi une notif Telegram en parallèle. Click pour voir les messages reçus avec lien Adlead.">i</span></div>
+      <div class="kpi-value" id="kpi-wa-replies">—</div>
+      <div class="kpi-delta">Messages reçus des prospects</div>
+    </div>
+    <div class="kpi-card clickable" onclick="openModal('denounced')">
+      <div class="kpi-label">Leads dénoncés<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads où l'ERP / un prescripteur a la main commercialement (is_under_prescription=true). On ne les relance jamais pour ne pas créer de conflit commercial.">i</span></div>
       <div class="kpi-value" id="kpi-denounced">—</div>
       <div class="kpi-delta">Skip ERP / prescripteur</div>
     </div>
-    <div class="kpi-card" id="kpi-failclosed-card">
-      <div class="kpi-label">À traiter manuellement</div>
+    <div class="kpi-card clickable" id="kpi-failclosed-card" onclick="openModal('failclosed')">
+      <div class="kpi-label">À traiter manuellement<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads bloqués par le filtre 'fail-closed dénonciation' (l'API /registrations Adlead a échoué — on a préféré ne PAS envoyer plutôt que de risquer un doublon). À traiter manuellement.">i</span></div>
       <div class="kpi-value" id="kpi-failclosed">—</div>
       <div class="kpi-delta" id="kpi-failclosed-sub">Bloqués par fail-closed</div>
     </div>
     <div class="kpi-card accent-purple">
-      <div class="kpi-label">Taux d'efficacité</div>
+      <div class="kpi-label">Taux d'efficacité<span class="info-icon" data-info="Pourcentage des leads où le pipeline a réussi à envoyer un mail J+1 (sent), divisé par les leads décidés (sent + cancelled + denounced + optout). Mesure la qualité du flux entrant Adlead vs la prise en main commerciale.">i</span></div>
       <div class="kpi-value" id="kpi-efficiency">—</div>
       <div class="kpi-delta" id="kpi-efficiency-sub">Envoyés / décidés</div>
     </div>
@@ -537,6 +698,22 @@
 </div>
 
 <div class="toast-container" id="toasts"></div>
+
+<!-- Modal liste leads -->
+<div class="modal-overlay" id="modal-overlay" onclick="if (event.target === this) closeModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="modal-title">—</div>
+        <div class="modal-subtitle" id="modal-subtitle">—</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()" aria-label="Fermer">×</button>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <div class="modal-empty">Chargement…</div>
+    </div>
+  </div>
+</div>
 
 <script>
   const REFRESH_MS = 8000;
@@ -858,7 +1035,197 @@
     } catch (e) {
       el('status-text').innerHTML = `<span style="color: var(--catella-red);">Erreur de connexion — ${e.message}</span>`;
     }
+    // Compteur séparé pour les réponses WhatsApp (pas exposé dans /api/stats)
+    refreshWhatsAppReplies();
   }
+
+  async function refreshWhatsAppReplies() {
+    try {
+      const res = await fetch('/api/leads', { cache: 'no-store' });
+      if (!res.ok) return;
+      const all = await res.json();
+      const replies = all.filter(r => r.status === 'whatsapp_reply_received');
+      el('kpi-wa-replies').textContent = fmt.format(replies.length);
+    } catch (e) { /* silencieux */ }
+  }
+
+  // ─── Modal liste leads ────────────────────────────────────────────────
+  // Définition de chaque vue : titre, sous-titre, filtre, et colonnes affichées.
+  // Source de données : /api/leads (processedLeads) sauf 'pending' → /api/pending.
+  const MODAL_VIEWS = {
+    pending: {
+      title: 'En attente',
+      subtitle: "Leads en file d'attente, pas encore traités par le pipeline",
+      source: '/api/pending',
+      filter: () => true,
+      mapRow: (r) => ({
+        date: r.receivedAt,
+        program: r.programId,
+        lead: r.leadId,
+        contact: '(à fetch)',
+        status: 'pending',
+        checkAt: r.checkAt,
+      }),
+    },
+    today: {
+      title: 'Envoyés aujourd\'hui',
+      subtitle: 'Mails J+1 partis depuis 00:00 Paris ce matin',
+      source: '/api/leads',
+      filter: (r) => r.status === 'sent' && isToday(r.processedAt),
+    },
+    week: {
+      title: 'Envoyés cette semaine',
+      subtitle: '7 derniers jours glissants',
+      source: '/api/leads',
+      filter: (r) => r.status === 'sent' && isLastNDays(r.processedAt, 7),
+    },
+    cancelled: {
+      title: 'Commercial a pris la main',
+      subtitle: 'Leads annulés car le commercial direct avait déjà agi avant J+1',
+      source: '/api/leads',
+      filter: (r) => r.status === 'cancelled',
+    },
+    optout: {
+      title: 'Opt-out',
+      subtitle: 'Contacts désinscrits',
+      source: '/api/leads',
+      filter: (r) => r.status === 'optout',
+    },
+    total: {
+      title: 'Total traité',
+      subtitle: 'Tous les leads passés par le pipeline',
+      source: '/api/leads',
+      filter: () => true,
+    },
+    'whatsapp-today': {
+      title: 'WhatsApp aujourd\'hui',
+      subtitle: 'Mails J+1 doublés d\'un WhatsApp Twilio aujourd\'hui',
+      source: '/api/leads',
+      filter: (r) => r.status === 'sent' && r.whatsappSid && isToday(r.processedAt),
+    },
+    'whatsapp-replies': {
+      title: 'Réponses WhatsApp reçues',
+      subtitle: 'Messages prospects reçus via webhook Twilio',
+      source: '/api/leads',
+      filter: (r) => r.status === 'whatsapp_reply_received',
+      columnsExtra: true, // affichage spécial pour montrer le corps du message
+    },
+    denounced: {
+      title: 'Leads dénoncés',
+      subtitle: 'is_under_prescription=true côté Adlead — ERP/prescripteur a la main',
+      source: '/api/leads',
+      filter: (r) => r.status === 'denounced',
+    },
+    failclosed: {
+      title: 'À traiter manuellement (fail-closed)',
+      subtitle: 'Bloqués par le filtre dénonciation /registrations qui a échoué',
+      source: '/api/leads',
+      filter: (r) => r.registrationsFailClosed === true,
+    },
+  };
+
+  function isToday(iso) {
+    if (!iso) return false;
+    const d = new Date(iso);
+    const now = new Date();
+    return d.getFullYear() === now.getFullYear()
+      && d.getMonth() === now.getMonth()
+      && d.getDate() === now.getDate();
+  }
+  function isLastNDays(iso, n) {
+    if (!iso) return false;
+    const d = new Date(iso);
+    const cutoff = Date.now() - n * 24 * 60 * 60 * 1000;
+    return d.getTime() >= cutoff;
+  }
+
+  function adleadUrl(programId, leadId) {
+    if (!programId || !leadId) return null;
+    return `https://crm.adlead.immo/catella/programs/${programId}/contact-management/leads/${leadId}`;
+  }
+
+  async function openModal(viewKey) {
+    const view = MODAL_VIEWS[viewKey];
+    if (!view) return;
+    el('modal-title').textContent = view.title;
+    el('modal-subtitle').textContent = view.subtitle;
+    el('modal-body').innerHTML = '<div class="modal-empty">Chargement…</div>';
+    el('modal-overlay').classList.add('open');
+    try {
+      const res = await fetch(view.source, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const all = await res.json();
+      const list = all.filter(view.filter).reverse(); // récents en premier
+      if (list.length === 0) {
+        el('modal-body').innerHTML = '<div class="modal-empty">Aucun lead dans cette catégorie.</div>';
+        return;
+      }
+      renderModalList(list, view);
+    } catch (e) {
+      el('modal-body').innerHTML = `<div class="modal-empty" style="color:var(--catella-red);">Erreur : ${e.message}</div>`;
+    }
+  }
+
+  function renderModalList(list, view) {
+    const rows = list.map(r => {
+      const url = adleadUrl(r.programId, r.leadId);
+      const linkCell = url
+        ? `<a href="${url}" target="_blank" rel="noopener">Ouvrir Adlead ↗</a>`
+        : '<span style="color:var(--text-dim);">—</span>';
+
+      // Vue spéciale réponses WhatsApp : afficher le body du message
+      if (view.columnsExtra) {
+        return `<tr>
+          <td>${esc(formatDate(r.receivedAt || r.processedAt))}</td>
+          <td>${esc(r.programName || ('Programme #' + (r.programId || '?')))}</td>
+          <td>${esc(r.whatsappProfileName || r.contactName || '—')}</td>
+          <td><code style="font-size:11px;">${esc(r.whatsappFrom || '—')}</code></td>
+          <td style="max-width:300px;">${esc((r.whatsappBody || '').slice(0, 200))}${(r.whatsappBody||'').length > 200 ? '…' : ''}</td>
+          <td>${r.matched ? '✅' : '<span style="color:var(--orange);">❓ non matché</span>'}</td>
+          <td>${linkCell}</td>
+        </tr>`;
+      }
+
+      return `<tr>
+        <td>${esc(formatDate(r.processedAt || r.receivedAt))}</td>
+        <td>${esc(r.programName || ('Programme #' + (r.programId || '?')))}</td>
+        <td>${esc(r.contactName || '—')}</td>
+        <td>${esc(r.email || '—')}</td>
+        <td><span class="feed-status ${r.status || 'pending'}">${esc(r.status || '—')}</span></td>
+        <td>${r.whatsappSid ? '<span style="color:#25D366;">✓</span>' : ''}</td>
+        <td>${linkCell}</td>
+      </tr>`;
+    }).join('');
+
+    const headers = view.columnsExtra
+      ? `<tr><th>Date</th><th>Programme</th><th>Contact</th><th>De (WhatsApp)</th><th>Message</th><th>Match</th><th>Adlead</th></tr>`
+      : `<tr><th>Date</th><th>Programme</th><th>Contact</th><th>Email</th><th>Statut</th><th>WA</th><th>Adlead</th></tr>`;
+
+    el('modal-body').innerHTML = `
+      <div style="margin-bottom: 12px; color: var(--text-dim); font-size: 13px;">${list.length} lead(s)</div>
+      <table class="modal-table">
+        <thead>${headers}</thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  function closeModal() {
+    el('modal-overlay').classList.remove('open');
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return d.toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Fermer modal avec Echap
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && el('modal-overlay').classList.contains('open')) {
+      closeModal();
+    }
+  });
 
   refresh();
   setInterval(refresh, REFRESH_MS);
