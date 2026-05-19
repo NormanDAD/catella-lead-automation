@@ -243,6 +243,7 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(__dirname, 'data');
 const PENDING_FILE = path.join(DATA_DIR, 'pending_leads.json');
 const PROCESSED_FILE = path.join(DATA_DIR, 'processed_leads.json');
+const PROGRAM_NAME_CACHE_FILE = path.join(DATA_DIR, 'program_name_cache.json');
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -292,16 +293,35 @@ if (_dirCheck.ok) {
 let pendingLeads = loadJsonFile(PENDING_FILE, []);
 let processedLeads = loadJsonFile(PROCESSED_FILE, []);
 
-// Cache global programId → nom propre. Source 1 : processedLeads avec name
-// résolu (rempli au boot). Source 2 : fetchProgram à la demande via endpoint
-// admin /api/admin/resolve-program-names. Utilisé par /api/pending et /api/leads
-// pour ne plus afficher "Programme #XXX" dans le dashboard.
+// Cache global programId → nom propre. Persisté sur disque
+// (PROGRAM_NAME_CACHE_FILE) pour survivre aux redéploiements Railway.
+// Sources de peuplement :
+//   1. loadProgramNameCacheFromDisk() au boot (fichier persisté)
+//   2. prefetchProgramNameCacheFromProcessed() au boot (fallback depuis processedLeads)
+//   3. processPendingLead() au runtime (chaque lead traité avec nom résolu)
+//   4. endpoint admin /api/admin/resolve-program-names (lookup Adlead à la demande)
+// Utilisé par /api/pending et /api/leads pour ne plus afficher "Programme #XXX"
+// dans le dashboard.
 const programNameCache = new Map();
+const BAD_PROGRAM_NAME = /^Programme #\d+$/;
+function saveProgramNameCache() {
+  saveJsonFile(PROGRAM_NAME_CACHE_FILE, Object.fromEntries(programNameCache));
+}
+function loadProgramNameCacheFromDisk() {
+  const obj = loadJsonFile(PROGRAM_NAME_CACHE_FILE, {});
+  let loaded = 0;
+  for (const [k, v] of Object.entries(obj)) {
+    if (k && v && !BAD_PROGRAM_NAME.test(v)) {
+      programNameCache.set(String(k), v);
+      loaded++;
+    }
+  }
+  console.log(`[programNameCache] ${loaded} entrées chargées depuis ${PROGRAM_NAME_CACHE_FILE}`);
+}
 function prefetchProgramNameCacheFromProcessed() {
-  const BAD = /^Programme #\d+$/;
   let added = 0;
   for (const r of processedLeads) {
-    if (r.programId && r.programName && !BAD.test(r.programName)) {
+    if (r.programId && r.programName && !BAD_PROGRAM_NAME.test(r.programName)) {
       const key = String(r.programId);
       if (!programNameCache.has(key)) {
         programNameCache.set(key, r.programName);
@@ -309,8 +329,10 @@ function prefetchProgramNameCacheFromProcessed() {
       }
     }
   }
-  console.log(`[programNameCache] ${added} programmes mis en cache au boot (depuis ${processedLeads.length} processedLeads)`);
+  console.log(`[programNameCache] ${added} programmes ajoutés au cache depuis processedLeads (${processedLeads.length} records scannés)`);
+  if (added > 0) saveProgramNameCache();
 }
+loadProgramNameCacheFromDisk();
 prefetchProgramNameCacheFromProcessed();
 
 // ─── INBOX WATCHER (réponses prospect) ──────────────────────────────────────
@@ -1441,6 +1463,13 @@ async function processPendingLead(entry) {
       programName = programApi?.name || programApi?.nom_commercial || null;
     }
     if (!programName) programName = `Programme #${entry.programId}`;
+    if (entry.programId && !BAD_PROGRAM_NAME.test(programName)) {
+      const _k = String(entry.programId);
+      if (programNameCache.get(_k) !== programName) {
+        programNameCache.set(_k, programName);
+        saveProgramNameCache();
+      }
+    }
 
     // ─── GATE J1_AUTO_SEND_DISABLED ─────────────────────────────────────────
     // Si activé, on a fait tous les checks (lead valide, contact OK, pas dénoncé,
@@ -2253,14 +2282,13 @@ app.post('/api/admin/rehydrate-j1-manual-pending', (req, res) => {
 // cache. Throttle 1.1s entre chaque pour respecter rate limit Adlead.
 // Idempotent — peut être rappelé sans risque.
 app.post('/api/admin/resolve-program-names', async (req, res) => {
-  const BAD = /^Programme #\d+$/;
   const unknownIds = new Set();
   // Collecte les programIds qui n'ont pas encore de nom propre dans le cache.
   for (const r of [...processedLeads, ...pendingLeads]) {
     if (!r.programId) continue;
     const key = String(r.programId);
     if (programNameCache.has(key)) continue;
-    if (r.programName && !BAD.test(r.programName)) continue; // déjà propre
+    if (r.programName && !BAD_PROGRAM_NAME.test(r.programName)) continue; // déjà propre
     unknownIds.add(key);
   }
   const ids = [...unknownIds];
@@ -2283,6 +2311,7 @@ app.post('/api/admin/resolve-program-names', async (req, res) => {
       console.error(`[resolve-program-names] ${id} échec:`, e.message);
     }
   }
+  if (resolved > 0) saveProgramNameCache();
   res.json({
     totalUnique: ids.length,
     resolved,
