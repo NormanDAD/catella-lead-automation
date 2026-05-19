@@ -439,6 +439,9 @@
     cursor: pointer;
     font-weight: 500;
     transition: all 0.15s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
   }
   .feed-btn:hover {
     background: var(--bg);
@@ -769,18 +772,17 @@
           ? ' · <span style="color:var(--catella-red);font-weight:600;">WhatsApp ✗</span>'
           : '';
       const reasonHtml = r.reason ? `<div class="feed-reason">${esc(r.reason)}</div>` : '';
-      // Bouton "Traiter maintenant" : uniquement pour les leads non-envoyés avec un leadId valide
       let actionsHtml = '';
-      if (rawStatus !== 'sent' && r.leadId && r.programId) {
-        const label = r.failClosed ? 'Forcer l\'envoi' : 'Retraiter';
-        const btnClass = r.failClosed ? 'feed-btn primary' : 'feed-btn';
-        actionsHtml = `
-          <div class="feed-actions">
-            <button class="${btnClass}" onclick="processNow(${r.leadId}, ${r.programId}, ${r.interestId || 'null'}, this)">
-              ${label}
-            </button>
-          </div>
-        `;
+      if (r.leadId && r.programId) {
+        const adUrl = adleadUrl(r.programId, r.leadId);
+        const adLink = adUrl ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn">Fiche Adlead ↗</a>` : '';
+        if (r.failClosed) {
+          actionsHtml = `<div class="feed-actions"><button class="feed-btn primary" onclick="processNow(${r.leadId}, ${r.programId}, ${r.interestId || 'null'}, this)">Forcer l'envoi</button>${adLink}</div>`;
+        } else if (rawStatus !== 'sent') {
+          actionsHtml = `<div class="feed-actions"><button class="feed-btn" onclick="processNow(${r.leadId}, ${r.programId}, ${r.interestId || 'null'}, this)">Retraiter</button>${adLink}</div>`;
+        } else {
+          actionsHtml = `<div class="feed-actions">${adLink}</div>`;
+        }
       }
       return `
         <div class="feed-item">
