@@ -2292,6 +2292,37 @@ app.post('/api/admin/resolve-program-names', async (req, res) => {
   });
 });
 
+// Admin : rétrofitte le programName des records processedLeads à partir du
+// programNameCache (peuplé par /api/admin/resolve-program-names). Aucune
+// requête réseau, juste un remplacement en mémoire + saveProcessed().
+// Utile pour nettoyer l'affichage "Programme #XXX" dans le dashboard quand
+// le cache a résolu le nom mais que les anciens records persistés gardent
+// le placeholder. Idempotent.
+app.post('/api/admin/backfill-program-names', (req, res) => {
+  const BAD_NAME = /^Programme #\d+$/;
+  let updated = 0, missingInCache = 0, alreadyClean = 0;
+  for (const r of processedLeads) {
+    if (!r.programId) continue;
+    const isBad = !r.programName || BAD_NAME.test(r.programName);
+    if (!isBad) { alreadyClean++; continue; }
+    const cached = programNameCache.get(String(r.programId));
+    if (cached) {
+      r.programName = cached;
+      updated++;
+    } else {
+      missingInCache++;
+    }
+  }
+  if (updated > 0) saveProcessed();
+  res.json({
+    updated,
+    missingInCache,
+    alreadyClean,
+    totalProcessed: processedLeads.length,
+    cacheSize: programNameCache.size,
+  });
+});
+
 // Admin EMERGENCY : marque tous les records dont programName matche
 // /^Programme #\d+$/ comme j15Sent=true. À appeler une fois après l'incident
 // 2026-05-15 pour empêcher tout futur tick J+15 de re-spammer ces leads avec
