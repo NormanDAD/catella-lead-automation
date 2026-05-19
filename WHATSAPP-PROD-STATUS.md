@@ -1,16 +1,14 @@
-# WhatsApp Prod Meta — État au 11 mai 2026
-
-État de la migration sandbox Twilio → prod Meta-approved. À consulter dès que Meta a validé soit le numéro, soit le template, pour finaliser le basculement.
+# WhatsApp Prod Meta — État au 20 mai 2026
 
 ## Status global
 
-| Composant | État | Délai estimé |
-|---|---|---|
-| 🔢 Numéro Twilio dédié `+1 385 332 4609` | ⏳ **En attente** côté Meta (review WABA) | ≤24h |
-| 📝 Template `relance_j1_catella` | ⏳ **Under Review** côté Meta | 24-48h |
-| 🔌 Code `sendWhatsAppViaTwilio` (ContentSid) | ❌ pas encore modifié | À faire dès template approuvé |
-| 🔁 Webhook réponses prospect `/webhook/whatsapp-incoming` | ❌ pas codé | À faire en parallèle |
-| ❎ Désactivation sender test `+1 555 873 4459` | ❌ pas fait | À faire après E2E validé sur nouveau numéro |
+| Composant | État |
+|---|---|
+| 🔢 Numéro Twilio dédié `+1 385 332 4609` | ✅ **Approuvé Meta** — `TWILIO_WHATSAPP_FROM=whatsapp:+13853324609` sur Railway |
+| 📝 Template `relance_j1_catella` | ✅ **Approuvé Meta** — `TWILIO_TEMPLATE_RELANCE_J1=HX1e7f179526b97844b6576c68af2b35b7` sur Railway |
+| 🔌 Code `sendWhatsAppViaTwilio` (ContentSid) | ✅ **En place** — bascule auto en mode ContentSid si variable présente |
+| 🔁 Webhook réponses prospect `/webhook/whatsapp-incoming` | ✅ Codé |
+| ❎ Désactivation sender test `+1 555 873 4459` | ⚠️ À faire après E2E validé sur nouveau numéro |
 
 ## Identifiants importants à conserver
 
