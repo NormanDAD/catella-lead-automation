@@ -57,6 +57,9 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  // Date (ISO YYYY-MM-DD) à partir de laquelle les WhatsApp sont en prod Meta réelle.
+  // Les envois antérieurs (sandbox non-délivrés) sont exclus des stats WhatsApp.
+  WHATSAPP_PROD_START_DATE: process.env.WHATSAPP_PROD_START_DATE || '',
   // ContentSid Twilio du template Meta "relance_j1_catella" (ex: HX1e7f...).
   // Si vide → envoi en mode Body (sandbox / hors templates) avec wording legacy
   //   buildWhatsAppMessage(). Marche uniquement pour numéros opted-in au sandbox.
@@ -1885,11 +1888,9 @@ app.get('/api/stats', (req, res) => {
     }
 
     // ── Métriques WhatsApp (best-effort, ne comptent que sur les leads 'sent')
-    //    Si l'envoi a été tenté (whatsappEnabled=true ET whatsappTo renseigné) :
-    //      - succès  → whatsappSid présent et pas d'erreur
-    //      - erreur  → whatsappError non null
-    //      - skipped → whatsappEnabled=true mais pas de téléphone / optout
-    if (st === 'sent' && l.whatsappEnabled) {
+    //    Si WHATSAPP_PROD_START_DATE défini, on exclut les envois antérieurs (sandbox).
+    const waAfterProdStart = !CONFIG.WHATSAPP_PROD_START_DATE || dayKey >= CONFIG.WHATSAPP_PROD_START_DATE;
+    if (st === 'sent' && l.whatsappEnabled && waAfterProdStart) {
       whatsapp.enabledLeads += 1;
       if (l.whatsappSid && !l.whatsappError) {
         whatsapp.sent += 1;
@@ -1907,7 +1908,7 @@ app.get('/api/stats', (req, res) => {
       today.total += 1;
       if (today[st] !== undefined) today[st] += 1;
       if (l.registrationsFailClosed) today.failClosed += 1;
-      if (st === 'sent' && l.whatsappEnabled) {
+      if (st === 'sent' && l.whatsappEnabled && waAfterProdStart) {
         if (l.whatsappSid && !l.whatsappError) today.whatsappSent += 1;
         else if (l.whatsappError)              today.whatsappError += 1;
       }
@@ -1916,7 +1917,7 @@ app.get('/api/stats', (req, res) => {
       week.total += 1;
       if (week[st] !== undefined) week[st] += 1;
       if (l.registrationsFailClosed) week.failClosed += 1;
-      if (st === 'sent' && l.whatsappEnabled) {
+      if (st === 'sent' && l.whatsappEnabled && waAfterProdStart) {
         if (l.whatsappSid && !l.whatsappError) week.whatsappSent += 1;
         else if (l.whatsappError)              week.whatsappError += 1;
       }
