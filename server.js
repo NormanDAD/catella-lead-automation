@@ -2671,6 +2671,113 @@ app.get('/api/dashboard/replies', (req, res) => {
   });
 });
 
+// ─── WHATSAPP CONVERSATIONS ─────────────────────────────────────────────────
+// GET /api/whatsapp/conversations
+// Regroupe tous les messages WhatsApp (envoyés + reçus + réponses Norman) par
+// numéro de téléphone prospect, pour alimenter l'interface de chat du dashboard.
+app.get('/api/whatsapp/conversations', (req, res) => {
+  const convMap = {};
+
+  for (const l of processedLeads) {
+    let phone = null;
+    let direction = null;
+
+    if (l.status === 'sent' && l.whatsappSid && l.whatsappTo) {
+      phone = l.whatsappTo;
+      direction = 'out';
+    } else if (l.status === 'whatsapp_reply_received' && l.whatsappFrom) {
+      phone = l.whatsappFrom;
+      direction = 'in';
+    } else if (l.status === 'whatsapp_reply_sent' && l.whatsappTo) {
+      phone = l.whatsappTo;
+      direction = 'out';
+    }
+
+    if (!phone) continue;
+
+    if (!convMap[phone]) {
+      convMap[phone] = {
+        phone,
+        contactName: null,
+        programName: null,
+        leadId: null,
+        programId: null,
+        messages: [],
+        lastActivity: null,
+        lastInboundAt: null,
+      };
+    }
+
+    const conv = convMap[phone];
+    if (l.contactName && !conv.contactName) conv.contactName = l.contactName;
+    if (l.programName  && !conv.programName)  conv.programName  = l.programName;
+    if (l.leadId       && !conv.leadId)        conv.leadId       = l.leadId;
+    if (l.programId    && !conv.programId)     conv.programId    = l.programId;
+
+    const msgTime = l.processedAt || l.receivedAt || l.sentAt;
+    conv.messages.push({
+      id:          l.id,
+      direction,
+      body:        l.whatsappBody || '',
+      time:        msgTime,
+      sid:         l.whatsappSid || l.whatsappMessageSid || null,
+      profileName: l.whatsappProfileName || null,
+      isTemplate:  l.status === 'sent',
+    });
+
+    if (!conv.lastActivity || msgTime > conv.lastActivity) conv.lastActivity = msgTime;
+    if (direction === 'in' && (!conv.lastInboundAt || msgTime > conv.lastInboundAt)) {
+      conv.lastInboundAt = msgTime;
+    }
+  }
+
+  const conversations = Object.values(convMap)
+    .filter(c => c.messages.some(m => m.direction === 'in'))
+    .map(c => {
+      c.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
+      // Fenêtre libre Meta : 24h après le dernier message entrant
+      const windowExpiresAt = c.lastInboundAt
+        ? new Date(new Date(c.lastInboundAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
+        : null;
+      const windowOpen = windowExpiresAt ? new Date() < new Date(windowExpiresAt) : false;
+      return { ...c, windowExpiresAt, windowOpen };
+    })
+    .sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+
+  res.json(conversations);
+});
+
+// POST /api/whatsapp/reply
+// Envoie un message libre à un prospect (dans la fenêtre 24h Meta) et le stocke.
+app.post('/api/whatsapp/reply', async (req, res) => {
+  const { to, body, leadId, programId, contactName, programName } = req.body || {};
+  if (!to || !body) return res.status(400).json({ error: 'to et body requis' });
+  if (!CONFIG.TWILIO_ACCOUNT_SID) return res.status(503).json({ error: 'Twilio non configuré' });
+
+  try {
+    const resp = await sendWhatsAppViaTwilio(to, body);
+    const record = {
+      id:           `wa-sent-${Date.now()}`,
+      status:       'whatsapp_reply_sent',
+      leadId:       leadId   || null,
+      programId:    programId || null,
+      programName:  programName || null,
+      contactName:  contactName || null,
+      whatsappTo:   to,
+      whatsappBody: body,
+      whatsappSid:  resp.sid || null,
+      processedAt:  new Date().toISOString(),
+    };
+    processedLeads.push(record);
+    saveProcessed();
+    console.log(`[whatsapp/reply] ✅ réponse envoyée à ${to} (sid: ${resp.sid})`);
+    res.json({ ok: true, sid: resp.sid });
+  } catch (e) {
+    console.error(`[whatsapp/reply] ⚠️ échec envoi à ${to}: ${e.message}`);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post('/webhook/adlead', (req, res) => {
   if (!verifyAdleadSignature(req)) {
     console.warn('[webhook] Signature invalide');

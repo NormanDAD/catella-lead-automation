@@ -461,6 +461,133 @@
     cursor: not-allowed;
   }
 
+  /* ── WhatsApp Conversations ─────────────────────────────────────── */
+  .conv-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.45);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+  }
+  .conv-overlay.open { display: flex; }
+  .conv-panel {
+    background: var(--card);
+    border-radius: 12px;
+    width: 96vw; max-width: 780px;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.18);
+    overflow: hidden;
+  }
+  .conv-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .conv-header-title { font-size: 16px; font-weight: 700; }
+  .conv-header-sub   { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .conv-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .conv-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .conv-card-header {
+    padding: 10px 14px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .conv-card-name  { font-weight: 600; font-size: 13px; }
+  .conv-card-prog  { font-size: 12px; color: var(--text-dim); }
+  .conv-window-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 20px; flex-shrink: 0;
+  }
+  .conv-window-badge.open   { background: #e8f7ee; color: #1d7a3a; }
+  .conv-window-badge.closed { background: #f0f0f2; color: var(--text-dim); }
+  .conv-messages {
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .conv-bubble {
+    max-width: 78%;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.45;
+    word-break: break-word;
+  }
+  .conv-bubble.out {
+    align-self: flex-end;
+    background: #e5f1ff;
+    color: #1a3a5c;
+    border-bottom-right-radius: 3px;
+  }
+  .conv-bubble.in {
+    align-self: flex-start;
+    background: #e8f7ee;
+    color: #1a3a2a;
+    border-bottom-left-radius: 3px;
+  }
+  .conv-bubble.template { opacity: 0.7; font-style: italic; }
+  .conv-bubble-time {
+    font-size: 10px; color: var(--text-dim); margin-top: 3px;
+    text-align: right;
+  }
+  .conv-bubble.in .conv-bubble-time { text-align: left; }
+  .conv-reply-box {
+    display: flex; gap: 8px; padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .conv-reply-box.disabled { opacity: 0.5; pointer-events: none; }
+  .conv-reply-input {
+    flex: 1;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    background: var(--card);
+    color: var(--text);
+    resize: none;
+    font-family: inherit;
+    min-height: 38px;
+    max-height: 100px;
+  }
+  .conv-reply-input:focus { outline: none; border-color: var(--blue); }
+  .conv-reply-send {
+    padding: 8px 16px;
+    background: #25D366;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .conv-reply-send:hover   { background: #1da851; }
+  .conv-reply-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .conv-empty {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 40px 20px;
+  }
+
   /* Programmes table */
   .prog-list {
     max-height: 500px;
@@ -636,7 +763,7 @@
       <div class="kpi-value" id="kpi-whatsapp-today">—</div>
       <div class="kpi-delta" id="kpi-whatsapp-sub">—</div>
     </div>
-    <div class="kpi-card accent-green clickable" onclick="openModal('whatsapp-replies')">
+    <div class="kpi-card accent-green clickable" onclick="openConv()">
       <div class="kpi-label">Réponses WhatsApp<span class="info-icon" onclick="event.stopPropagation()" data-info="Réponses reçues des prospects sur WhatsApp (via webhook Twilio). Tu reçois aussi une notif Telegram en parallèle. Click pour voir les messages reçus avec lien Adlead.">i</span></div>
       <div class="kpi-value" id="kpi-wa-replies">—</div>
       <div class="kpi-delta">Messages reçus des prospects</div>
@@ -701,6 +828,22 @@
 </div>
 
 <div class="toast-container" id="toasts"></div>
+
+<!-- Conversations WhatsApp -->
+<div class="conv-overlay" id="conv-overlay" onclick="if(event.target===this) closeConv()">
+  <div class="conv-panel">
+    <div class="conv-header">
+      <div>
+        <div class="conv-header-title">💬 Conversations WhatsApp</div>
+        <div class="conv-header-sub" id="conv-subtitle">—</div>
+      </div>
+      <button class="modal-close" onclick="closeConv()" aria-label="Fermer">×</button>
+    </div>
+    <div class="conv-list" id="conv-list">
+      <div class="conv-empty">Chargement…</div>
+    </div>
+  </div>
+</div>
 
 <!-- Modal liste leads -->
 <div class="modal-overlay" id="modal-overlay" onclick="if (event.target === this) closeModal()">
@@ -1224,10 +1367,124 @@
 
   // Fermer modal avec Echap
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && el('modal-overlay').classList.contains('open')) {
-      closeModal();
+    if (e.key === 'Escape') {
+      if (el('conv-overlay').classList.contains('open'))  closeConv();
+      else if (el('modal-overlay').classList.contains('open')) closeModal();
     }
   });
+
+  // ── Conversations WhatsApp ─────────────────────────────────────────────
+  async function openConv() {
+    el('conv-overlay').classList.add('open');
+    el('conv-subtitle').textContent = 'Chargement…';
+    el('conv-list').innerHTML = '<div class="conv-empty">Chargement…</div>';
+    try {
+      const res = await fetch('/api/whatsapp/conversations', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const convs = await res.json();
+      el('conv-subtitle').textContent = convs.length
+        ? `${convs.length} conversation${convs.length > 1 ? 's' : ''}`
+        : 'Aucune réponse reçue pour le moment';
+      renderConv(convs);
+    } catch (e) {
+      el('conv-list').innerHTML = `<div class="conv-empty" style="color:var(--catella-red)">Erreur : ${e.message}</div>`;
+    }
+  }
+
+  function closeConv() {
+    el('conv-overlay').classList.remove('open');
+  }
+
+  function renderConv(convs) {
+    if (!convs.length) {
+      el('conv-list').innerHTML = '<div class="conv-empty">Aucune réponse WhatsApp reçue pour l\'instant.<br>Dès qu\'un prospect répond, la conversation apparaît ici.</div>';
+      return;
+    }
+    el('conv-list').innerHTML = convs.map((c, ci) => {
+      const adUrl = c.leadId && c.programId ? adleadUrl(c.programId, c.leadId) : null;
+      const adLink = adUrl ? `<a href="${adUrl}" target="_blank" rel="noopener" style="font-size:11px;color:var(--blue);">Fiche Adlead ↗</a>` : '';
+      const windowBadge = c.windowOpen
+        ? `<span class="conv-window-badge open">✓ Fenêtre libre ouverte</span>`
+        : `<span class="conv-window-badge closed">Fenêtre expirée</span>`;
+      const bubbles = c.messages.map(m => {
+        const timeStr = formatDate(m.time);
+        const label = m.isTemplate ? '(message auto pipeline)' : esc(m.body);
+        return `
+          <div class="conv-bubble ${m.direction}${m.isTemplate ? ' template' : ''}">
+            ${label}
+            <div class="conv-bubble-time">${timeStr}</div>
+          </div>`;
+      }).join('');
+      const disabledAttr = c.windowOpen ? '' : 'disabled';
+      const disabledClass = c.windowOpen ? '' : 'disabled';
+      const placeholder = c.windowOpen
+        ? 'Écrire un message…'
+        : 'Fenêtre 24h expirée — impossible de répondre en texte libre';
+      return `
+        <div class="conv-card">
+          <div class="conv-card-header">
+            <div>
+              <div class="conv-card-name">${esc(c.contactName || c.phone)}</div>
+              <div class="conv-card-prog">${esc(c.programName || '—')} · ${esc(c.phone)} ${adLink}</div>
+            </div>
+            ${windowBadge}
+          </div>
+          <div class="conv-messages" id="conv-msgs-${ci}">${bubbles}</div>
+          <div class="conv-reply-box ${disabledClass}">
+            <textarea class="conv-reply-input" id="conv-input-${ci}" placeholder="${placeholder}" rows="1" ${disabledAttr}
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendWaReply(${ci})}"
+            ></textarea>
+            <button class="conv-reply-send" id="conv-send-${ci}" onclick="sendWaReply(${ci})" ${disabledAttr}>Envoyer</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    // Auto-scroll chaque fil au dernier message
+    convs.forEach((_, ci) => {
+      const msgs = el(`conv-msgs-${ci}`);
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    });
+
+    // Stocker les conversations pour l'envoi
+    window._convData = convs;
+  }
+
+  async function sendWaReply(ci) {
+    const conv = (window._convData || [])[ci];
+    if (!conv) return;
+    const input = el(`conv-input-${ci}`);
+    const btn   = el(`conv-send-${ci}`);
+    const body  = (input.value || '').trim();
+    if (!body) return;
+
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      const res = await fetch('/api/whatsapp/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to:          conv.phone,
+          body,
+          leadId:      conv.leadId,
+          programId:   conv.programId,
+          contactName: conv.contactName,
+          programName: conv.programName,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok || !d.ok) throw new Error(d.error || 'Erreur inconnue');
+
+      input.value = '';
+      toast('✅ Envoyé', `WhatsApp parti à ${conv.contactName || conv.phone}`);
+      // Recharge les conversations pour afficher le nouveau message
+      await openConv();
+    } catch (e) {
+      toast('❌ Échec', e.message);
+      btn.disabled = false;
+      btn.textContent = 'Envoyer';
+    }
+  }
 
   refresh();
   setInterval(refresh, REFRESH_MS);
