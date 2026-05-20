@@ -1843,6 +1843,8 @@ app.post('/api/admin/clear-pending', (req, res) => {
 app.get('/api/stats', (req, res) => {
   const now = Date.now();
   const DAY = 24 * 60 * 60 * 1000;
+  const todayParis = new Date(now).toLocaleString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 10);
+  const weekAgo = now - 7 * DAY;
 
   // 14 derniers jours en buckets (ordre chronologique, plus ancien → plus récent)
   const byDayMap = {};
@@ -1904,7 +1906,8 @@ app.get('/api/stats', (req, res) => {
     }
 
     const processedAge = now - new Date(l.processedAt || 0).getTime();
-    if (processedAge < DAY) {
+    const processedDayParis = new Date(l.processedAt || 0).toLocaleString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 10);
+    if (processedDayParis === todayParis) {
       today.total += 1;
       if (today[st] !== undefined) today[st] += 1;
       if (l.registrationsFailClosed) today.failClosed += 1;
@@ -1913,7 +1916,7 @@ app.get('/api/stats', (req, res) => {
         else if (l.whatsappError)              today.whatsappError += 1;
       }
     }
-    if (processedAge < 7 * DAY) {
+    if (new Date(l.processedAt || 0).getTime() >= weekAgo) {
       week.total += 1;
       if (week[st] !== undefined) week[st] += 1;
       if (l.registrationsFailClosed) week.failClosed += 1;
