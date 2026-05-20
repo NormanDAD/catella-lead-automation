@@ -1233,13 +1233,13 @@
       el('kpi-prog-count').textContent = `${d.programmes || 0} programmes en base`;
 
       // ── Equation row
-      el('eq-sent').textContent     = fmt.format(d.counts?.sent || 0);
-      el('eq-cancelled').textContent = fmt.format(d.counts?.cancelled || 0);
-      el('eq-denounced').textContent = fmt.format(d.counts?.denounced || 0);
-      el('eq-skipped').textContent  = fmt.format(d.counts?.skipped || 0);
-      el('eq-error').textContent    = fmt.format(d.counts?.error || 0);
-      el('eq-optout').textContent   = fmt.format(d.counts?.optout || 0);
-      el('eq-total').textContent    = fmt.format(d.total || 0);
+      el('eq-sent').textContent      = fmt.format(d.today?.sent || 0);
+      el('eq-cancelled').textContent = fmt.format(d.today?.cancelled || 0);
+      el('eq-denounced').textContent = fmt.format(d.today?.denounced || 0);
+      el('eq-skipped').textContent   = fmt.format(d.today?.skipped || 0);
+      el('eq-error').textContent     = fmt.format(d.today?.error || 0);
+      el('eq-optout').textContent    = fmt.format(d.today?.optout || 0);
+      el('eq-total').textContent     = fmt.format(d.today?.total || 0);
 
       // ── WhatsApp & dénonciations (rétrocompatible : champs nouveaux = 0 par défaut)
       const waToday = d.today?.whatsappSent || 0;
@@ -1332,16 +1332,16 @@
       filter: (r) => r.status === 'sent' && isLastNDays(r.processedAt, 7),
     },
     cancelled: {
-      title: 'Commercial a pris la main',
-      subtitle: 'Leads annulés car le commercial direct avait déjà agi avant J+1',
+      title: 'Annulés aujourd\'hui',
+      subtitle: 'Leads annulés aujourd\'hui — commercial avait déjà agi avant J+1',
       source: '/api/leads',
-      filter: (r) => r.status === 'cancelled',
+      filter: (r) => r.status === 'cancelled' && isToday(r.processedAt),
     },
     optout: {
-      title: 'Opt-out',
-      subtitle: 'Contacts désinscrits',
+      title: 'Opt-out aujourd\'hui',
+      subtitle: 'Contacts désinscrits aujourd\'hui',
       source: '/api/leads',
-      filter: (r) => r.status === 'optout',
+      filter: (r) => r.status === 'optout' && isToday(r.processedAt),
     },
     total: {
       title: 'Total traité',
@@ -1363,22 +1363,22 @@
       columnsExtra: true, // affichage spécial pour montrer le corps du message
     },
     skipped: {
-      title: 'Leads skipped',
-      subtitle: 'Leads ignorés faute de nom de programme dans le cache',
+      title: 'Skipped aujourd\'hui',
+      subtitle: 'Leads ignorés aujourd\'hui faute de nom de programme dans le cache',
       source: '/api/leads',
-      filter: (r) => r.status === 'skipped',
+      filter: (r) => r.status === 'skipped' && isToday(r.processedAt),
     },
     errors: {
-      title: 'Erreurs techniques',
-      subtitle: 'Leads en erreur lors du traitement pipeline',
+      title: 'Erreurs aujourd\'hui',
+      subtitle: 'Leads en erreur lors du traitement pipeline aujourd\'hui',
       source: '/api/leads',
-      filter: (r) => r.status === 'error',
+      filter: (r) => r.status === 'error' && isToday(r.processedAt),
     },
     denounced: {
-      title: 'Leads dénoncés',
+      title: 'Dénoncés aujourd\'hui',
       subtitle: 'is_under_prescription=true côté Adlead — ERP/prescripteur a la main',
       source: '/api/leads',
-      filter: (r) => r.status === 'denounced',
+      filter: (r) => r.status === 'denounced' && isToday(r.processedAt),
     },
     failclosed: {
       title: 'À traiter manuellement (fail-closed)',
