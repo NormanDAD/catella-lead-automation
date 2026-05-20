@@ -736,7 +736,7 @@
     <div class="kpi-card accent-green clickable" onclick="openModal('today')">
       <div class="kpi-label">Envoyés aujourd'hui<span class="info-icon" onclick="event.stopPropagation()" data-info="Nombre de mails J+1 partis aux prospects aujourd'hui (jour calendaire courant, fuseau Paris). Inclut uniquement les envois auto-pipeline. Click pour voir le détail.">i</span></div>
       <div class="kpi-value" id="kpi-today">—</div>
-      <div class="kpi-delta" id="kpi-today-sub">—</div>
+      <div class="kpi-delta" id="kpi-today-sub" onclick="event.stopPropagation(); openModal('today-all')" style="cursor:pointer; text-decoration:underline dotted;">—</div>
     </div>
     <div class="kpi-card accent-red clickable" onclick="openModal('week')">
       <div class="kpi-label">Cette semaine<span class="info-icon" onclick="event.stopPropagation()" data-info="Total des mails J+1 partis sur les 7 derniers jours glissants. Pratique pour voir la tendance vs la semaine précédente.">i</span></div>
@@ -1217,6 +1217,12 @@
       subtitle: 'Mails J+1 partis depuis 00:00 Paris ce matin',
       source: '/api/leads',
       filter: (r) => r.status === 'sent' && isToday(r.processedAt),
+    },
+    'today-all': {
+      title: 'Tous les leads traités aujourd\'hui',
+      subtitle: 'Toutes catégories : envoyés, annulés, dénoncés, erreurs…',
+      source: '/api/leads',
+      filter: (r) => isToday(r.processedAt) && r.status !== 'whatsapp_reply_received' && r.status !== 'whatsapp_reply_sent',
     },
     week: {
       title: 'Envoyés cette semaine',
