@@ -588,6 +588,60 @@
     padding: 40px 20px;
   }
 
+  /* ── Equation row ───────────────────────────────────────────────── */
+  .equation-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-bottom: 24px;
+  }
+  .eq-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid transparent;
+    min-width: 70px;
+    text-align: center;
+  }
+  .eq-item:hover { background: var(--bg); border-color: var(--border); }
+  .eq-item.total { cursor: default; }
+  .eq-item.total:hover { background: transparent; border-color: transparent; }
+  .eq-value {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+  .eq-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    white-space: nowrap;
+  }
+  .eq-sent   .eq-value { color: var(--green); }
+  .eq-cancel .eq-value { color: var(--text-dim); }
+  .eq-skip   .eq-value { color: var(--purple); }
+  .eq-error  .eq-value { color: var(--catella-red); }
+  .eq-den    .eq-value { color: var(--catella-red); }
+  .eq-opt    .eq-value { color: var(--orange); }
+  .eq-total  .eq-value { color: var(--blue); }
+  .eq-sep {
+    font-size: 20px;
+    font-weight: 300;
+    color: var(--text-dim);
+    padding: 0 2px;
+    user-select: none;
+  }
+  .eq-sep.equals { font-size: 22px; color: var(--text); font-weight: 500; }
+
   /* Programmes table */
   .prog-list {
     max-height: 500px;
@@ -782,6 +836,44 @@
       <div class="kpi-label">Taux d'efficacité<span class="info-icon" data-info="Pourcentage des leads où le pipeline a réussi à envoyer un mail J+1 (sent), divisé par les leads décidés (sent + cancelled + denounced + optout). Mesure la qualité du flux entrant Adlead vs la prise en main commerciale.">i</span></div>
       <div class="kpi-value" id="kpi-efficiency">—</div>
       <div class="kpi-delta" id="kpi-efficiency-sub">Envoyés / décidés</div>
+    </div>
+  </div>
+
+  <!-- Équation totaux -->
+  <div class="equation-row">
+    <div class="eq-item eq-sent" onclick="openModal('today')">
+      <div class="eq-value" id="eq-sent">—</div>
+      <div class="eq-label">Envoyés</div>
+    </div>
+    <div class="eq-sep">+</div>
+    <div class="eq-item eq-cancel" onclick="openModal('cancelled')">
+      <div class="eq-value" id="eq-cancelled">—</div>
+      <div class="eq-label">Annulés</div>
+    </div>
+    <div class="eq-sep">+</div>
+    <div class="eq-item eq-den" onclick="openModal('denounced')">
+      <div class="eq-value" id="eq-denounced">—</div>
+      <div class="eq-label">Dénoncés</div>
+    </div>
+    <div class="eq-sep">+</div>
+    <div class="eq-item eq-skip" onclick="openModal('skipped')">
+      <div class="eq-value" id="eq-skipped">—</div>
+      <div class="eq-label">Skipped</div>
+    </div>
+    <div class="eq-sep">+</div>
+    <div class="eq-item eq-error" onclick="openModal('errors')">
+      <div class="eq-value" id="eq-error">—</div>
+      <div class="eq-label">Erreurs</div>
+    </div>
+    <div class="eq-sep">+</div>
+    <div class="eq-item eq-opt" onclick="openModal('optout')">
+      <div class="eq-value" id="eq-optout">—</div>
+      <div class="eq-label">Opt-out</div>
+    </div>
+    <div class="eq-sep equals">=</div>
+    <div class="eq-item eq-total total">
+      <div class="eq-value" id="eq-total">—</div>
+      <div class="eq-label">Total classés</div>
     </div>
   </div>
 
@@ -1140,6 +1232,15 @@
       el('kpi-total').textContent = fmt.format(d.total || 0);
       el('kpi-prog-count').textContent = `${d.programmes || 0} programmes en base`;
 
+      // ── Equation row
+      el('eq-sent').textContent     = fmt.format(d.counts?.sent || 0);
+      el('eq-cancelled').textContent = fmt.format(d.counts?.cancelled || 0);
+      el('eq-denounced').textContent = fmt.format(d.counts?.denounced || 0);
+      el('eq-skipped').textContent  = fmt.format(d.counts?.skipped || 0);
+      el('eq-error').textContent    = fmt.format(d.counts?.error || 0);
+      el('eq-optout').textContent   = fmt.format(d.counts?.optout || 0);
+      el('eq-total').textContent    = fmt.format(d.total || 0);
+
       // ── WhatsApp & dénonciations (rétrocompatible : champs nouveaux = 0 par défaut)
       const waToday = d.today?.whatsappSent || 0;
       const waTodayErr = d.today?.whatsappError || 0;
@@ -1260,6 +1361,18 @@
       source: '/api/leads',
       filter: (r) => r.status === 'whatsapp_reply_received',
       columnsExtra: true, // affichage spécial pour montrer le corps du message
+    },
+    skipped: {
+      title: 'Leads skipped',
+      subtitle: 'Leads ignorés faute de nom de programme dans le cache',
+      source: '/api/leads',
+      filter: (r) => r.status === 'skipped',
+    },
+    errors: {
+      title: 'Erreurs techniques',
+      subtitle: 'Leads en erreur lors du traitement pipeline',
+      source: '/api/leads',
+      filter: (r) => r.status === 'error',
     },
     denounced: {
       title: 'Leads dénoncés',
