@@ -47,6 +47,17 @@ const CONFIG = {
                            .split(',')
                            .map(s => s.trim())
                            .filter(Boolean),
+  // Format: "Nom Agent:YYYY-MM-DD,Nom Agent2:YYYY-MM-DD"
+  // Leads dont le tracker correspond seront skippés jusqu'à la date indiquée.
+  PAUSED_AGENTS: String(process.env.PAUSED_AGENTS || '')
+                   .split(',')
+                   .map(s => s.trim())
+                   .filter(Boolean)
+                   .map(entry => {
+                     const idx = entry.lastIndexOf(':');
+                     if (idx === -1) return { name: entry, until: null };
+                     return { name: entry.slice(0, idx).trim(), until: entry.slice(idx + 1).trim() };
+                   }),
   // ── WhatsApp via Twilio ──────────────────────────────────────────────────
   // Phase 1 (sandbox) : TWILIO_WHATSAPP_FROM = "whatsapp:+14155238886"
   //   → destinataires doivent avoir joint le sandbox (ex: "join fence-cutting")
@@ -1249,6 +1260,33 @@ async function processPendingLead(entry) {
       });
     }
     console.log(`[debug] interest ${entry.interestId} (source=${interestSource}) — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
+
+    // ── CHECK AGENT EN PAUSE (PAUSED_AGENTS) ─────────────────────────────────
+    if (CONFIG.PAUSED_AGENTS.length > 0) {
+      const trackerName = (obj) => {
+        if (!obj) return '';
+        if (typeof obj === 'string') return obj.toLowerCase();
+        return (obj.fullname || obj.full_name || obj.name || obj.display_name || obj.email || '').toLowerCase();
+      };
+      const t1 = trackerName(interest.first_tracker);
+      const t2 = trackerName(interest.last_tracker);
+      const today = new Date().toISOString().slice(0, 10);
+      for (const pa of CONFIG.PAUSED_AGENTS) {
+        const agentLower = pa.name.toLowerCase();
+        if ((t1.includes(agentLower) || t2.includes(agentLower)) && (!pa.until || today <= pa.until)) {
+          console.log(`[process] lead ${entry.leadId} — agent "${pa.name}" en pause jusqu'au ${pa.until || '∞'} → skip`);
+          return finalize({
+            id: entry.interestId,
+            status: 'skipped',
+            reason: `Agent "${pa.name}" en période d'adaptation (pause jusqu'au ${pa.until || '∞'})`,
+            contactName: lead.contacts?.[0]?.fullname || '',
+            email: lead.contacts?.[0]?.email_primary || '',
+            programId: entry.programId,
+            programName: interest.program?.name || '',
+          });
+        }
+      }
+    }
 
     // Détection "commercial a pris la main"
     //   - Soit le status de l'interest n'est plus "to-process" (si on a pu le relire)
