@@ -1802,6 +1802,28 @@ app.get('/api/leads', (req, res) => {
   res.json(enriched);
 });
 
+// Leads ayant déjà reçu au moins une relance J+3
+app.get('/api/j3m/relanced', (req, res) => {
+  const BAD = /^Programme #\d+$/;
+  const leads = processedLeads.filter(l => (l.j3mRelances || 0) > 0).slice().reverse().map(r => {
+    const needsResolve = !r.programName || BAD.test(r.programName);
+    const programName = needsResolve ? (programNameCache.get(String(r.programId)) || r.programName) : r.programName;
+    return { ...r, programName };
+  });
+  res.json(leads);
+});
+
+// Leads ayant déjà reçu au moins une relance J+15
+app.get('/api/j15/relanced', (req, res) => {
+  const BAD = /^Programme #\d+$/;
+  const leads = processedLeads.filter(l => (l.j15Relances || 0) > 0).slice().reverse().map(r => {
+    const needsResolve = !r.programName || BAD.test(r.programName);
+    const programName = needsResolve ? (programNameCache.get(String(r.programId)) || r.programName) : r.programName;
+    return { ...r, programName };
+  });
+  res.json(leads);
+});
+
 app.get('/api/pending', (req, res) => {
   // Enrichissement programName via le cache global (cf programNameCache plus bas).
   const enriched = pendingLeads.slice().reverse().map(p => ({
@@ -2076,6 +2098,20 @@ app.get('/api/stats', (req, res) => {
     skipRegistrationsCheck: CONFIG.SKIP_REGISTRATIONS_CHECK,
     manualOverrideCount,
     noFollowUpCount,
+    j3m: {
+      enabled: CONFIG.J3M_ENABLED,
+      sendDisabled: CONFIG.J3M_SEND_DISABLED,
+      lastRunYmd: typeof lastJ3MRunYmd !== 'undefined' ? lastJ3MRunYmd : null,
+      relancedLeads: processedLeads.filter(l => (l.j3mRelances || 0) > 0).length,
+      totalSends: processedLeads.reduce((s, l) => s + (l.j3mRelances || 0), 0),
+    },
+    j15: {
+      enabled: CONFIG.J15_ENABLED,
+      sendDisabled: CONFIG.J15_SEND_DISABLED,
+      lastRunYmd: typeof lastJ15RunYmd !== 'undefined' ? lastJ15RunYmd : null,
+      relancedLeads: processedLeads.filter(l => (l.j15Relances || 0) > 0).length,
+      totalSends: processedLeads.reduce((s, l) => s + (l.j15Relances || 0), 0),
+    },
   });
 });
 

@@ -672,6 +672,79 @@
   }
   .eq-sep.equals { font-size: 22px; color: var(--text); font-weight: 500; }
 
+  /* Règles de relance J+3 / J+15 */
+  .rules-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .rule-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .rule-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .rule-title {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .rule-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .rule-badge.active    { background: #d1fae5; color: #065f46; }
+  .rule-badge.dryrun    { background: #dbeafe; color: #1e40af; }
+  .rule-badge.disabled  { background: #f3f4f6; color: #6b7280; }
+  .rule-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .rule-stat {
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid transparent;
+  }
+  .rule-stat:hover { background: var(--border); }
+  .rule-stat.no-click { cursor: default; }
+  .rule-stat.no-click:hover { background: var(--bg); }
+  .rule-stat-value {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--blue);
+  }
+  .rule-stat-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+  .rule-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .rule-meta span { display: flex; align-items: center; gap: 4px; }
+
   /* Programmes table */
   .prog-list {
     max-height: 500px;
@@ -946,6 +1019,66 @@
     <div class="eq-item eq-total total">
       <div class="eq-value" id="eq-total">—</div>
       <div class="eq-label">Total classés</div>
+    </div>
+  </div>
+
+  <!-- ── RÈGLES DE RELANCE ─────────────────────────────────────── -->
+  <div class="kpi-section">
+    <div class="kpi-section-title">Règles de relance</div>
+    <div class="rules-grid">
+
+      <!-- J+3 -->
+      <div class="rule-panel">
+        <div class="rule-header">
+          <div class="rule-title">J+3 — Relance matin</div>
+          <span class="rule-badge" id="j3m-badge">—</span>
+        </div>
+        <div class="rule-stats">
+          <div class="rule-stat" onclick="openModal('j3m-relanced')">
+            <div class="rule-stat-value" id="j3m-relanced">—</div>
+            <div class="rule-stat-label">Leads relancés</div>
+          </div>
+          <div class="rule-stat" onclick="openModal('j3m-relanced')">
+            <div class="rule-stat-value" id="j3m-sends">—</div>
+            <div class="rule-stat-label">Total envois</div>
+          </div>
+          <div class="rule-stat no-click">
+            <div class="rule-stat-value" id="j3m-lastrun" style="font-size:14px; padding-top:4px;">—</div>
+            <div class="rule-stat-label">Dernière exéc.</div>
+          </div>
+        </div>
+        <div class="rule-meta">
+          <span>🕐 Cron 9h15 Paris · quotidien</span>
+          <span>📧 J1 email · J2 WA · J3 email</span>
+        </div>
+      </div>
+
+      <!-- J+15 -->
+      <div class="rule-panel">
+        <div class="rule-header">
+          <div class="rule-title">J+15 — Relance tardive</div>
+          <span class="rule-badge" id="j15-badge">—</span>
+        </div>
+        <div class="rule-stats">
+          <div class="rule-stat" onclick="openModal('j15-relanced')">
+            <div class="rule-stat-value" id="j15-relanced">—</div>
+            <div class="rule-stat-label">Leads relancés</div>
+          </div>
+          <div class="rule-stat" onclick="openModal('j15-relanced')">
+            <div class="rule-stat-value" id="j15-sends">—</div>
+            <div class="rule-stat-label">Total envois</div>
+          </div>
+          <div class="rule-stat no-click">
+            <div class="rule-stat-value" id="j15-lastrun" style="font-size:14px; padding-top:4px;">—</div>
+            <div class="rule-stat-label">Dernière exéc.</div>
+          </div>
+        </div>
+        <div class="rule-meta">
+          <span>🕐 Cron 10h00 Paris · quotidien</span>
+          <span>📧 J15+J16+J17 email/WA</span>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -1368,6 +1501,27 @@
 
       el('kpi-manual').textContent = fmt.format(d.manualOverrideCount || 0);
 
+      // ── Règles de relance J+3 / J+15
+      function setBadge(id, enabled, sendDisabled) {
+        const b = el(id);
+        b.className = 'rule-badge';
+        if (!enabled) { b.textContent = 'Désactivé'; b.classList.add('disabled'); }
+        else if (sendDisabled) { b.textContent = 'Dry-run'; b.classList.add('dryrun'); }
+        else { b.textContent = 'Actif'; b.classList.add('active'); }
+      }
+      if (d.j3m) {
+        setBadge('j3m-badge', d.j3m.enabled, d.j3m.sendDisabled);
+        el('j3m-relanced').textContent = fmt.format(d.j3m.relancedLeads || 0);
+        el('j3m-sends').textContent = fmt.format(d.j3m.totalSends || 0);
+        el('j3m-lastrun').textContent = d.j3m.lastRunYmd || 'Jamais';
+      }
+      if (d.j15) {
+        setBadge('j15-badge', d.j15.enabled, d.j15.sendDisabled);
+        el('j15-relanced').textContent = fmt.format(d.j15.relancedLeads || 0);
+        el('j15-sends').textContent = fmt.format(d.j15.totalSends || 0);
+        el('j15-lastrun').textContent = d.j15.lastRunYmd || 'Jamais';
+      }
+
       // ── Santé système (3 voyants)
       renderHealth(d.services);
 
@@ -1506,6 +1660,18 @@
         const age = Date.now() - new Date(r.processedAt || 0).getTime();
         return age > 3 * 24 * 60 * 60 * 1000;
       },
+    },
+    'j3m-relanced': {
+      title: 'Relancés J+3',
+      subtitle: 'Leads ayant reçu au moins une relance automatique J+3 (règle 2)',
+      source: '/api/j3m/relanced',
+      filter: () => true,
+    },
+    'j15-relanced': {
+      title: 'Relancés J+15',
+      subtitle: 'Leads ayant reçu au moins une relance automatique J+15 (règle 3)',
+      source: '/api/j15/relanced',
+      filter: () => true,
     },
   };
 
