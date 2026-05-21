@@ -1184,6 +1184,7 @@ async function processPendingLead(entry) {
       receivedAt: entry.receivedAt,
       checkAt: entry.checkAt,
       processedAt: new Date().toISOString(),
+      ...(entry.manualSource ? { manualOverride: true } : {}),
     });
     saveProcessed();
   };
@@ -1863,6 +1864,7 @@ app.get('/api/stats', (req, res) => {
 
   const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0 };
   const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0 };
+  let manualOverrideCount = 0;
   // byProgram enrichi : pour chaque programme on stocke un objet avec le détail
   // des statuts au lieu d'un simple total, pour pouvoir afficher un mini-tableau
   // dans le dashboard (sent / denounced / failClosed / taux).
@@ -1937,6 +1939,7 @@ app.get('/api/stats', (req, res) => {
     }
 
     if (l.registrationsFailClosed) totalFailClosed += 1;
+    if (l.manualOverride) manualOverrideCount += 1;
 
     if (l.programName) {
       if (!byProgram[l.programName]) {
@@ -2022,6 +2025,7 @@ app.get('/api/stats', (req, res) => {
     registrationsFailClosed: RUNTIME_STATS.registrationsFailClosed,
     registrationsFailClosedTotal: totalFailClosed,
     skipRegistrationsCheck: CONFIG.SKIP_REGISTRATIONS_CHECK,
+    manualOverrideCount,
   });
 });
 
@@ -2143,6 +2147,7 @@ app.post('/api/test/process-now', async (req, res) => {
     attempts: 0,
     maxAttempts: 1,
     force,
+    manualSource: true,
   };
   const before = processedLeads.length;
   try {

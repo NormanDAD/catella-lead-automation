@@ -837,6 +837,11 @@
       <div class="kpi-value" id="kpi-efficiency">—</div>
       <div class="kpi-delta" id="kpi-efficiency-sub">Envoyés / décidés</div>
     </div>
+    <div class="kpi-card accent-blue clickable" onclick="openModal('manual-override')">
+      <div class="kpi-label">Traités par toi<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads que tu as traités manuellement via le bouton 'Forcer l'envoi' ou 'Retraiter' dans le dashboard. Compteur depuis le 21/05/2026.">i</span></div>
+      <div class="kpi-value" id="kpi-manual">—</div>
+      <div class="kpi-delta">Relances manuelles</div>
+    </div>
   </div>
 
   <!-- Équation totaux -->
@@ -1269,6 +1274,9 @@
         ? `${d.counts?.sent || 0} envoyés sur ${totalDecided} décidés`
         : 'Envoyés / décidés';
 
+      // ── Traités manuellement
+      el('kpi-manual').textContent = fmt.format(d.manualOverrideCount || 0);
+
       // ── Santé système (3 voyants)
       renderHealth(d.services);
 
@@ -1385,6 +1393,12 @@
       subtitle: 'Bloqués par le filtre dénonciation /registrations qui a échoué',
       source: '/api/leads',
       filter: (r) => r.registrationsFailClosed === true,
+    },
+    'manual-override': {
+      title: 'Traités par toi',
+      subtitle: 'Leads relancés manuellement via "Forcer l\'envoi" ou "Retraiter" (depuis le 21/05/2026)',
+      source: '/api/leads',
+      filter: (r) => r.manualOverride === true,
     },
   };
 
