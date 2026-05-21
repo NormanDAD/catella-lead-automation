@@ -2478,6 +2478,46 @@ app.post('/api/admin/j15-mark-bad-names', (req, res) => {
   res.json({ marked, totalProcessed: processedLeads.length, at });
 });
 
+// Admin : backfill statuts de livraison WhatsApp via Twilio API.
+// Pour chaque lead avec whatsappSid + pas encore de whatsappDeliveryStatus,
+// on interroge GET /Messages/{sid}.json et on stocke le statut réel.
+// À appeler une seule fois après le déploiement du delivery tracking.
+app.post('/api/admin/backfill-wa-status', async (req, res) => {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) {
+    return res.status(400).json({ error: 'Twilio non configuré' });
+  }
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const candidates = processedLeads.filter(l =>
+    l.whatsappSid && !l.whatsappError && !l.whatsappDeliveryStatus &&
+    (!CONFIG.WHATSAPP_PROD_START_DATE || (l.processedAt || '').slice(0, 10) >= CONFIG.WHATSAPP_PROD_START_DATE)
+  );
+  const results = [];
+  for (const record of candidates) {
+    try {
+      const url = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages/${record.whatsappSid}.json`;
+      const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+      if (!r.ok) { results.push({ leadId: record.leadId, sid: record.whatsappSid, error: `HTTP ${r.status}` }); continue; }
+      const data = await r.json();
+      const status = (data.status || '').toLowerCase();
+      const prevRank = WA_STATUS_RANK[record.whatsappDeliveryStatus] ?? -2;
+      const newRank  = WA_STATUS_RANK[status] ?? -2;
+      if (newRank > prevRank) {
+        record.whatsappDeliveryStatus = status;
+        if (status === 'delivered' && !record.whatsappDeliveredAt) record.whatsappDeliveredAt = data.date_updated || new Date().toISOString();
+        if (status === 'read'      && !record.whatsappReadAt)      record.whatsappReadAt      = data.date_updated || new Date().toISOString();
+      }
+      results.push({ leadId: record.leadId, sid: record.whatsappSid, status, programName: record.programName });
+    } catch (e) {
+      results.push({ leadId: record.leadId, sid: record.whatsappSid, error: e.message });
+    }
+    await new Promise(r => setTimeout(r, 200)); // throttle Twilio API
+  }
+  saveProcessed();
+  const summary = results.reduce((acc, r) => { acc[r.status || r.error || 'unknown'] = (acc[r.status || r.error || 'unknown'] || 0) + 1; return acc; }, {});
+  console.log(`[admin/backfill-wa-status] ${candidates.length} SID(s) traités:`, summary);
+  res.json({ processed: candidates.length, summary, results });
+});
+
 // Usage : GET /api/test/lead-dump?programId=611&leadId=1633940
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
