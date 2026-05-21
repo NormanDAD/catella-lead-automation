@@ -129,6 +129,11 @@ const CONFIG = {
   // l'AUTH_TOKEN Twilio déjà configuré). TWILIO_VALIDATE_SIGNATURE=false pour bypass
   // en dev/debug uniquement.
   TWILIO_VALIDATE_SIGNATURE: process.env.TWILIO_VALIDATE_SIGNATURE !== 'false',
+  // URL de callback Twilio pour le suivi de livraison WhatsApp (delivery tracking).
+  // Twilio POST sur cette URL à chaque changement de statut : queued → sent → delivered → read → failed.
+  // Si vide, aucun StatusCallback n'est envoyé à l'envoi. Valeur prod :
+  // https://lead-automation-production-33e8.up.railway.app/webhook/twilio-status
+  TWILIO_STATUS_CALLBACK_URL: process.env.TWILIO_STATUS_CALLBACK_URL || '',
   // ── Notifications Telegram (canal "urgent" Norman) ─────────────────────────
   // Bot créé via @BotFather → @Catella_notif_bot. Token = TELEGRAM_BOT_TOKEN.
   // Norman a démarré la conversation avec /start → son chat_id = TELEGRAM_CHAT_ID.
@@ -1028,6 +1033,9 @@ async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
     // Mode Body legacy (sandbox / notifs internes).
     params.append('Body', body);
   }
+  if (CONFIG.TWILIO_STATUS_CALLBACK_URL) {
+    params.append('StatusCallback', CONFIG.TWILIO_STATUS_CALLBACK_URL);
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -1923,7 +1931,7 @@ app.get('/api/stats', (req, res) => {
   }
 
   const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0 };
-  const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0 };
+  const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0, delivered: 0, read: 0, failed: 0 };
   let manualOverrideCount = 0;
   // byProgram enrichi : pour chaque programme on stocke un objet avec le détail
   // des statuts au lieu d'un simple total, pour pouvoir afficher un mini-tableau
@@ -1959,6 +1967,9 @@ app.get('/api/stats', (req, res) => {
       if (l.whatsappSid && !l.whatsappError) {
         whatsapp.sent += 1;
         if (byDayMap[dayKey]) byDayMap[dayKey].whatsappSent += 1;
+        if (['delivered', 'read'].includes(l.whatsappDeliveryStatus)) whatsapp.delivered += 1;
+        if (l.whatsappDeliveryStatus === 'read') whatsapp.read += 1;
+        if (['failed', 'undelivered'].includes(l.whatsappDeliveryStatus)) whatsapp.failed += 1;
       } else if (l.whatsappError) {
         whatsapp.error += 1;
         if (byDayMap[dayKey]) byDayMap[dayKey].whatsappError += 1;
@@ -3136,6 +3147,37 @@ function validateTwilioSignature(req, fullUrl) {
     return false;
   }
 }
+
+// ─── WEBHOOK : Twilio status callback (delivery tracking WhatsApp) ──────────
+// Twilio POST à chaque transition : queued → sent → delivered → read (ou failed/undelivered).
+// URL configurée via TWILIO_STATUS_CALLBACK_URL (= param StatusCallback à l'envoi).
+// On stocke le statut le plus avancé sur le record du lead (ne régresse jamais).
+const WA_STATUS_RANK = { queued: 0, sent: 1, delivered: 2, read: 3, failed: -1, undelivered: -1 };
+app.post('/webhook/twilio-status', express.urlencoded({ extended: false }), (req, res) => {
+  res.sendStatus(204);
+  const p = req.body || {};
+  const sid    = p.MessageSid || p.SmsSid;
+  const status = (p.MessageStatus || p.SmsStatus || '').toLowerCase();
+  if (!sid || !status) return;
+
+  // Cherche le lead par SID (J+1, J+3, J+15 stockent tous whatsappSid)
+  const record = processedLeads.find(l =>
+    l.whatsappSid === sid ||
+    (l.j3mHistory  || []).some(h => h.whatsappSid === sid) ||
+    (l.j15History  || []).some(h => h.whatsappSid === sid)
+  );
+  if (!record) return; // SID inconnu (notif interne, vieux message sandbox)
+
+  const prevRank = WA_STATUS_RANK[record.whatsappDeliveryStatus] ?? -2;
+  const newRank  = WA_STATUS_RANK[status] ?? -2;
+  if (newRank > prevRank) {
+    record.whatsappDeliveryStatus = status;
+    if (status === 'delivered' && !record.whatsappDeliveredAt) record.whatsappDeliveredAt = new Date().toISOString();
+    if (status === 'read'      && !record.whatsappReadAt)      record.whatsappReadAt      = new Date().toISOString();
+    saveProcessed();
+    console.log(`[twilio-status] lead ${record.leadId} SID=${sid} → ${status}`);
+  }
+});
 
 // ─── WEBHOOK : Twilio "WhatsApp incoming" (réponses prospect) ───────────────
 // Configuré côté Twilio : WhatsApp Senders > +13853324609 > Edit > "Webhook URL for

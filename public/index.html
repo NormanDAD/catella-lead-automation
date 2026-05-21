@@ -1458,10 +1458,19 @@
       // ── WhatsApp & dénonciations (rétrocompatible : champs nouveaux = 0 par défaut)
       const waToday = d.today?.whatsappSent || 0;
       const waTodayErr = d.today?.whatsappError || 0;
+      const waDelivered = d.whatsapp?.delivered || 0;
+      const waRead = d.whatsapp?.read || 0;
+      const waFailed = d.whatsapp?.failed || 0;
       el('kpi-whatsapp-today').textContent = fmt.format(waToday);
-      el('kpi-whatsapp-sub').textContent = waTodayErr
-        ? `${waTodayErr} erreur(s) aujourd'hui`
-        : `${d.whatsapp?.sent || 0} envoyés au total`;
+      if (waTodayErr) {
+        el('kpi-whatsapp-sub').textContent = `${waTodayErr} erreur(s) aujourd'hui`;
+      } else if (waDelivered > 0) {
+        el('kpi-whatsapp-sub').textContent = waRead > 0
+          ? `${waRead} lus · ${waDelivered} délivrés · ${d.whatsapp?.sent || 0} envoyés`
+          : `${waDelivered} délivrés · ${d.whatsapp?.sent || 0} envoyés au total`;
+      } else {
+        el('kpi-whatsapp-sub').textContent = `${d.whatsapp?.sent || 0} envoyés · en attente de delivery`;
+      }
       el('kpi-denounced').textContent = fmt.format(d.counts?.denounced || 0);
 
       // ── Fail-closed
