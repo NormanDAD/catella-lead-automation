@@ -2025,6 +2025,17 @@ app.get('/api/stats', (req, res) => {
     twilio: buildHealth('Twilio (WhatsApp)', recentWhatsappErrors, recentWhatsappAttempts),
   };
 
+  // Leads sans suite commerciale visible : envoyés il y a > 3 jours, pas de réponse WA
+  const THREE_DAYS = 3 * DAY;
+  const repliedLeadIds = new Set(
+    processedLeads.filter(l => l.status === 'whatsapp_reply_received').map(l => l.leadId)
+  );
+  const noFollowUpCount = processedLeads.filter(l =>
+    l.status === 'sent' &&
+    (now - new Date(l.processedAt || 0).getTime()) > THREE_DAYS &&
+    !repliedLeadIds.has(l.leadId)
+  ).length;
+
   const recent = processedLeads.slice(-20).reverse().map(l => ({
     id: l.id,
     leadId: l.leadId,
@@ -2064,6 +2075,7 @@ app.get('/api/stats', (req, res) => {
     registrationsFailClosedTotal: totalFailClosed,
     skipRegistrationsCheck: CONFIG.SKIP_REGISTRATIONS_CHECK,
     manualOverrideCount,
+    noFollowUpCount,
   });
 });
 
