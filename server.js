@@ -3429,16 +3429,19 @@ schedulerTick().catch(e => console.error('[scheduler] tick initial:', e.message)
 const J15_ELIGIBLE_STATUSES = new Set(['sent', 'cancelled', 'skipped', 'error', 'j1-manual-pending']);
 
 function isJ15Candidate(record, now) {
-  if ((record.j15Relances || 0) >= 3) return false; // max atteint
-  if (record.status !== 'sent') return false; // uniquement les leads où J+1 a été envoyé
+  if (record.status !== 'sent') return false;
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
-  const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
+  const refMs = new Date(record.processedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
-  if (ageDays < 14) return false;  // trop récent — J+15 min 14j après J+1
-  if (ageDays > 90) return false;  // trop vieux, on abandonne
-  return true;
+  const n = record.j15Relances || 0;
+  // Fenêtre strictement journalière — évite de scanner des dizaines de leads.
+  // Le cron tourne à 10h00 Paris : window [n+15, n+16[ garantit au max 1 run par lead.
+  if (n === 0 && ageDays >= 15 && ageDays < 16) return true; // J+15
+  if (n === 1 && ageDays >= 16 && ageDays < 17) return true; // J+16
+  if (n === 2 && ageDays >= 17 && ageDays < 18) return true; // J+17
+  return false;
 }
 
 // ─── Templates email règle 3 (3 jours : J+15 / J+16 / J+17) ─────────────────
@@ -3805,14 +3808,18 @@ function getParisYmdHourMinute() {
 function isJ3MCandidate(record, now) {
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
-  if ((record.j3mRelances || 0) >= 3) return false;
-  if (record.status !== 'sent') return false; // uniquement les leads où J+1 a été envoyé
-  const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
+  if (record.status !== 'sent') return false;
+  const refMs = new Date(record.processedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
-  if (ageDays < 2.5) return false;  // trop récent — J+3 min 2.5j après J+1
-  if (ageDays > 60) return false;   // trop vieux, laisse J+15 ou abandon
-  return true;
+  const n = record.j3mRelances || 0;
+  // Fenêtre strictement journalière — 1 seule fenêtre de 24h par jour de cycle.
+  // Évite de scanner 200+ leads par run ; seuls les leads "du jour" sont examinés.
+  // Le cron tourne à 9h15 Paris : window [n+3, n+4[ garantit au max 1 run par lead.
+  if (n === 0 && ageDays >= 3   && ageDays < 4)  return true; // J+3
+  if (n === 1 && ageDays >= 4   && ageDays < 5)  return true; // J+4
+  if (n === 2 && ageDays >= 5   && ageDays < 6)  return true; // J+5
+  return false;
 }
 
 function buildJ3MEmailDay1(firstName, programName) {
