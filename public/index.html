@@ -672,6 +672,89 @@
   }
   .eq-sep.equals { font-size: 22px; color: var(--text); font-weight: 500; }
 
+  /* ── Activité du jour ───────────────────────────────────────────── */
+  .activity-strip {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 20px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .activity-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    white-space: nowrap;
+    margin-right: 4px;
+  }
+  .activity-chips {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+  .activity-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 14px;
+    cursor: default;
+    transition: background 0.15s;
+  }
+  .activity-chip.has-activity { background: #f0fdf4; border-color: #86efac; }
+  .activity-chip.has-activity .activity-chip-val { color: #15803d; }
+  .activity-chip-val { font-size: 17px; font-weight: 700; color: var(--text-dim); line-height: 1; }
+  .activity-chip-label { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+
+  /* ── Run report dans les panels J+3 / J+15 ──────────────────────── */
+  .run-report {
+    border-top: 1px solid var(--border);
+    margin-top: 14px;
+    padding-top: 12px;
+  }
+  .run-report-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .run-report-summary {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .run-report-summary .rr-sent { color: var(--green); }
+  .run-report-summary .rr-zero { color: var(--text-dim); }
+  .run-report-reasons {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .run-reason {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .run-reason-count {
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
   /* Règles de relance J+3 / J+15 */
   .rules-grid {
     display: grid;
@@ -883,6 +966,33 @@
     </div>
   </div>
 
+  <!-- ── ACTIVITÉ DU JOUR ─────────────────────────────────────── -->
+  <div class="activity-strip">
+    <span class="activity-label">Aujourd'hui</span>
+    <div class="activity-chips">
+      <div class="activity-chip" id="act-j1-chip">
+        <span class="activity-chip-val" id="act-j1-val">—</span>
+        <span class="activity-chip-label">J+1 envoyés</span>
+      </div>
+      <div class="activity-chip" id="act-j3-chip">
+        <span class="activity-chip-val" id="act-j3-val">—</span>
+        <span class="activity-chip-label">J+3 relancés</span>
+      </div>
+      <div class="activity-chip" id="act-j15-chip">
+        <span class="activity-chip-val" id="act-j15-val">—</span>
+        <span class="activity-chip-label">J+15 relancés</span>
+      </div>
+      <div class="activity-chip" id="act-wa-chip">
+        <span class="activity-chip-val" id="act-wa-val">—</span>
+        <span class="activity-chip-label">Réponses WA</span>
+      </div>
+      <div class="activity-chip" id="act-pending-chip">
+        <span class="activity-chip-val" id="act-pending-val">—</span>
+        <span class="activity-chip-label">En attente J+1</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ── SECTION 1 : ENTONNOIR ─────────────────────────────────── -->
   <div class="kpi-section">
     <div class="kpi-section-title">Entonnoir global</div>
@@ -1051,6 +1161,11 @@
           <span>🕐 Cron 9h15 Paris · quotidien</span>
           <span>📧 J1 email · J2 WA · J3 email</span>
         </div>
+        <div class="run-report" id="j3m-run-report" style="display:none">
+          <div class="run-report-title">Rapport dernière exéc.</div>
+          <div class="run-report-summary" id="j3m-run-summary"></div>
+          <div class="run-report-reasons" id="j3m-run-reasons"></div>
+        </div>
       </div>
 
       <!-- J+15 -->
@@ -1076,6 +1191,11 @@
         <div class="rule-meta">
           <span>🕐 Cron 10h00 Paris · quotidien</span>
           <span>📧 J15+J16+J17 email/WA</span>
+        </div>
+        <div class="run-report" id="j15-run-report" style="display:none">
+          <div class="run-report-title">Rapport dernière exéc.</div>
+          <div class="run-report-summary" id="j15-run-summary"></div>
+          <div class="run-report-reasons" id="j15-run-reasons"></div>
         </div>
       </div>
 
@@ -1510,6 +1630,37 @@
 
       el('kpi-manual').textContent = fmt.format(d.manualOverrideCount || 0);
 
+      // ── Activité du jour
+      function setChip(chipId, valId, value) {
+        el(valId).textContent = fmt.format(value);
+        const chip = el(chipId);
+        if (value > 0) chip.classList.add('has-activity');
+        else chip.classList.remove('has-activity');
+      }
+      setChip('act-j1-chip',      'act-j1-val',      d.today?.sent || 0);
+      setChip('act-j3-chip',      'act-j3-val',      d.j3m?.todaySent || 0);
+      setChip('act-j15-chip',     'act-j15-val',     d.j15?.todaySent || 0);
+      setChip('act-wa-chip',      'act-wa-val',       d.today?.whatsappSent || 0);
+      setChip('act-pending-chip', 'act-pending-val',  d.pending || 0);
+
+      // ── Run reports J+3 / J+15
+      function renderRunReport(reportSection, summaryId, reasonsId, report) {
+        if (!report) { el(reportSection).style.display = 'none'; return; }
+        el(reportSection).style.display = '';
+        const sentHtml = report.sent > 0
+          ? `<span class="rr-sent">${report.sent} envoyé${report.sent > 1 ? 's' : ''}</span>`
+          : `<span class="rr-zero">0 envoi</span>`;
+        el(summaryId).innerHTML =
+          `${fmt.format(report.scanned)} scannés → ${sentHtml} · ${fmt.format(report.skipped)} skippés` +
+          (report.errors > 0 ? ` · <span style="color:var(--catella-red)">${report.errors} erreur(s)</span>` : '') +
+          `<span style="color:var(--text-dim);font-size:11px;font-weight:400;margin-left:8px">${report.ymd}</span>`;
+        const reasons = report.skipReasons || {};
+        const sorted = Object.entries(reasons).sort((a,b) => b[1]-a[1]).slice(0, 4);
+        el(reasonsId).innerHTML = sorted.map(([reason, count]) =>
+          `<div class="run-reason"><span>${reason}</span><span class="run-reason-count">${count}×</span></div>`
+        ).join('');
+      }
+
       // ── Règles de relance J+3 / J+15
       function setBadge(id, enabled, sendDisabled) {
         const b = el(id);
@@ -1523,12 +1674,14 @@
         el('j3m-relanced').textContent = fmt.format(d.j3m.relancedLeads || 0);
         el('j3m-sends').textContent = fmt.format(d.j3m.totalSends || 0);
         el('j3m-lastrun').textContent = d.j3m.lastRunYmd || 'Jamais';
+        renderRunReport('j3m-run-report', 'j3m-run-summary', 'j3m-run-reasons', d.j3m.lastRunReport);
       }
       if (d.j15) {
         setBadge('j15-badge', d.j15.enabled, d.j15.sendDisabled);
         el('j15-relanced').textContent = fmt.format(d.j15.relancedLeads || 0);
         el('j15-sends').textContent = fmt.format(d.j15.totalSends || 0);
         el('j15-lastrun').textContent = d.j15.lastRunYmd || 'Jamais';
+        renderRunReport('j15-run-report', 'j15-run-summary', 'j15-run-reasons', d.j15.lastRunReport);
       }
 
       // ── Santé système (3 voyants)

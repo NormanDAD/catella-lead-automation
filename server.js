@@ -2112,16 +2112,20 @@ app.get('/api/stats', (req, res) => {
     j3m: {
       enabled: CONFIG.J3M_ENABLED,
       sendDisabled: CONFIG.J3M_SEND_DISABLED,
-      lastRunYmd: typeof lastJ3MRunYmd !== 'undefined' ? lastJ3MRunYmd : null,
+      lastRunYmd: lastJ3MRunYmd,
       relancedLeads: processedLeads.filter(l => (l.j3mRelances || 0) > 0).length,
       totalSends: processedLeads.reduce((s, l) => s + (l.j3mRelances || 0), 0),
+      todaySent: lastJ3MRunReport?.ymd === todayParis ? (lastJ3MRunReport.sent || 0) : 0,
+      lastRunReport: lastJ3MRunReport,
     },
     j15: {
       enabled: CONFIG.J15_ENABLED,
       sendDisabled: CONFIG.J15_SEND_DISABLED,
-      lastRunYmd: typeof lastJ15RunYmd !== 'undefined' ? lastJ15RunYmd : null,
+      lastRunYmd: lastJ15RunYmd,
       relancedLeads: processedLeads.filter(l => (l.j15Relances || 0) > 0).length,
       totalSends: processedLeads.reduce((s, l) => s + (l.j15Relances || 0), 0),
+      todaySent: lastJ15RunReport?.ymd === todayParis ? (lastJ15RunReport.sent || 0) : 0,
+      lastRunReport: lastJ15RunReport,
     },
   });
 });
@@ -3677,6 +3681,22 @@ async function j15Tick({ dryRun = false } = {}) {
       const sentCount = results.filter(r => r.sent).length;
       const skipCount = results.filter(r => r.skipped).length;
       const errCount  = results.filter(r => r.error || r.emailError || r.whatsappError).length;
+      const skipReasons = {};
+      for (const r of results) {
+        if (r.skipped && r.reason) {
+          const key = String(r.reason).slice(0, 60);
+          skipReasons[key] = (skipReasons[key] || 0) + 1;
+        }
+      }
+      lastJ15RunReport = {
+        ymd: new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 10),
+        completedAt: new Date().toISOString(),
+        scanned: candidates.length,
+        sent: sentCount,
+        skipped: skipCount,
+        errors: errCount,
+        skipReasons,
+      };
       if (sentCount + errCount > 0) {
         try {
           await sendTelegramNotification(
@@ -3692,6 +3712,7 @@ async function j15Tick({ dryRun = false } = {}) {
 }
 
 let lastJ15RunYmd = null;
+let lastJ15RunReport = null; // rapport de la dernière exéc réelle (pas dry-run)
 // ─── HELPERS FENÊTRE HORAIRE PARIS (règle Norman 2026-05-18) ───────────────
 // Pas d'envoi prospect en dehors de 9h-20h Paris. Dimanche entier exclu.
 // `testNow` (optionnel) permet de mocker l'heure pour les tests unitaires.
@@ -4037,6 +4058,23 @@ async function j3mTick({ dryRun = false } = {}) {
       const sentCount = results.filter(r => r.sent).length;
       const skipCount = results.filter(r => r.skipped).length;
       const errCount  = results.filter(r => r.error || r.emailError || r.whatsappError).length;
+      // Agrège les raisons de skip pour le rapport
+      const skipReasons = {};
+      for (const r of results) {
+        if (r.skipped && r.reason) {
+          const key = String(r.reason).slice(0, 60);
+          skipReasons[key] = (skipReasons[key] || 0) + 1;
+        }
+      }
+      lastJ3MRunReport = {
+        ymd: new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Paris' }).slice(0, 10),
+        completedAt: new Date().toISOString(),
+        scanned: candidates.length,
+        sent: sentCount,
+        skipped: skipCount,
+        errors: errCount,
+        skipReasons,
+      };
       if (sentCount + errCount > 0) {
         try {
           await sendTelegramNotification(
@@ -4052,6 +4090,7 @@ async function j3mTick({ dryRun = false } = {}) {
 }
 
 let lastJ3MRunYmd = null;
+let lastJ3MRunReport = null; // rapport de la dernière exéc réelle (pas dry-run)
 async function j3mCron() {
   const { ymd, hour, minute } = getParisYmdHourMinute();
   if (hour !== CONFIG.J3M_CRON_HOUR_PARIS) return;
