@@ -3429,10 +3429,11 @@ function isJ15Candidate(record, now) {
   if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false;
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
-  const refMs = new Date(record.receivedAt || record.processedAt || 0).getTime();
+  const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
-  if (ageDays > 90) return false; // trop vieux, on abandonne
+  if (ageDays < 14) return false;  // trop récent — J+15 min 14j après J+1
+  if (ageDays > 90) return false;  // trop vieux, on abandonne
   return true;
 }
 
@@ -3494,14 +3495,16 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   }
 
   // Trigger via Adlead `last_interaction_at` (date dernière action commerciale).
+  // Fallback sur record.processedAt (envoi J+1) si null — même raison que J+3.
   // Cadence J+15 / J+16 / J+17 depuis cette date :
   //   counter=0 + days>=15 → send #1 (soft last-chance)
   //   counter=1 + days>=16 → send #2 (urgence stock — WhatsApp)
   //   counter=2 + days>=17 → send #3 (clôture définitive)
-  if (!lead.last_interaction_at) {
-    return { skipped: true, reason: 'last_interaction_at null — pas de référence' };
+  const j15RefDate = lead.last_interaction_at || record.processedAt;
+  if (!j15RefDate) {
+    return { skipped: true, reason: 'last_interaction_at et processedAt tous deux null' };
   }
-  const daysSinceLastAction = (Date.now() - new Date(lead.last_interaction_at).getTime()) / (1000 * 60 * 60 * 24);
+  const daysSinceLastAction = (Date.now() - new Date(j15RefDate).getTime()) / (1000 * 60 * 60 * 24);
   const currentCount = record.j15Relances || 0;
   let dayNumber;
   if (currentCount === 0 && daysSinceLastAction >= 15) dayNumber = 1;
@@ -3782,10 +3785,12 @@ function isJ3MCandidate(record, now) {
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
   if ((record.j3mRelances || 0) >= 3) return false;
-  const refMs = new Date(record.receivedAt || record.processedAt || 0).getTime();
+  if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false; // skip cancelled/denounced/etc.
+  const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
-  if (ageDays > 60) return false; // trop vieux, on laisse J+15 ou abandon
+  if (ageDays < 2.5) return false;  // trop récent — J+3 min 2.5j après J+1
+  if (ageDays > 60) return false;   // trop vieux, laisse J+15 ou abandon
   return true;
 }
 
@@ -3854,16 +3859,19 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)`, reset };
   }
 
-  // Trigger via Adlead `last_interaction_at` = date de la dernière action commerciale
-  // (typiquement la pose manuelle de Norman "Mail envoyé" / "Appel non abouti").
+  // Trigger via Adlead `last_interaction_at` (date dernière action commerciale).
+  // Fallback sur record.processedAt (date envoi J+1) si null — permet de déclencher
+  // J+3 même quand le commercial n'a pas posé d'action Adlead explicite
+  // (PATCH /leads non dispo actuellement → last_interaction_at rarement mis à jour).
   // Cadence J+3 / J+4 / J+5 depuis cette date :
   //   counter=0 + daysSinceLastAction >= 3 → send #1 (doux)
   //   counter=1 + daysSinceLastAction >= 4 → send #2 (moyen)
   //   counter=2 + daysSinceLastAction >= 5 → send #3 (final)
-  if (!lead.last_interaction_at) {
-    return { skipped: true, reason: 'last_interaction_at null — pas de référence pour le décompte' };
+  const j3mRefDate = lead.last_interaction_at || record.processedAt;
+  if (!j3mRefDate) {
+    return { skipped: true, reason: 'last_interaction_at et processedAt tous deux null' };
   }
-  const daysSinceLastAction = (Date.now() - new Date(lead.last_interaction_at).getTime()) / (1000 * 60 * 60 * 24);
+  const daysSinceLastAction = (Date.now() - new Date(j3mRefDate).getTime()) / (1000 * 60 * 60 * 24);
   const currentCount = record.j3mRelances || 0;
   let dayNumber;
   if (currentCount === 0 && daysSinceLastAction >= 3) dayNumber = 1;
