@@ -3426,7 +3426,7 @@ const J15_ELIGIBLE_STATUSES = new Set(['sent', 'cancelled', 'skipped', 'error', 
 
 function isJ15Candidate(record, now) {
   if ((record.j15Relances || 0) >= 3) return false; // max atteint
-  if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false;
+  if (record.status !== 'sent') return false; // uniquement les leads où J+1 a été envoyé
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
   const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
@@ -3785,7 +3785,7 @@ function isJ3MCandidate(record, now) {
   if (!record.leadId || !record.programId) return false;
   if (EXCLUDED_PROGRAM_SET.has(String(record.programId))) return false;
   if ((record.j3mRelances || 0) >= 3) return false;
-  if (!J15_ELIGIBLE_STATUSES.has(record.status)) return false; // skip cancelled/denounced/etc.
+  if (record.status !== 'sent') return false; // uniquement les leads où J+1 a été envoyé
   const refMs = new Date(record.processedAt || record.receivedAt || 0).getTime();
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
