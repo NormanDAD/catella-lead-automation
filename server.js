@@ -2522,7 +2522,109 @@ app.post('/api/admin/backfill-wa-status', async (req, res) => {
   res.json({ processed: candidates.length, summary, results });
 });
 
-// Usage : GET /api/test/lead-dump?programId=611&leadId=1633940
+// POST /api/admin/backfill-whatsapp-replies
+// Interroge l'API Twilio pour récupérer tous les messages WhatsApp entrants (direction inbound)
+// et les injecte dans processedLeads comme s'ils avaient été reçus via webhook.
+// Idempotent : un SID déjà présent dans processedLeads n'est pas réinséré.
+// Paramètre optionnel : body JSON { dateSentAfter: "2026-01-01" } pour limiter la période.
+app.post('/api/admin/backfill-whatsapp-replies', async (req, res) => {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN || !CONFIG.TWILIO_WHATSAPP_FROM) {
+    return res.status(400).json({ error: 'Twilio non configuré' });
+  }
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const ourNumber = CONFIG.TWILIO_WHATSAPP_FROM.replace(/^whatsapp:/, '');
+  const { dateSentAfter } = req.body || {};
+
+  // Récupère les SIDs déjà présents pour dédoublonnage
+  const existingSids = new Set(
+    processedLeads
+      .filter(l => l.whatsappMessageSid)
+      .map(l => l.whatsappMessageSid)
+  );
+
+  const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const ourNorm = normalizeForMatch(ourNumber);
+
+  let allMessages = [];
+  let nextPageUrl = null;
+
+  // Première page
+  const initialParams = new URLSearchParams({
+    To: `whatsapp:${ourNumber}`,
+    PageSize: '100',
+  });
+  if (dateSentAfter) initialParams.set('DateSent>', dateSentAfter);
+  nextPageUrl = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?${initialParams.toString()}`;
+
+  // Pagination complète
+  while (nextPageUrl) {
+    const r = await fetch(nextPageUrl, { headers: { Authorization: `Basic ${auth}` } });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      return res.status(502).json({ error: `Twilio API ${r.status}`, detail: errText.slice(0, 200) });
+    }
+    const data = await r.json();
+    const messages = (data.messages || []).filter(m => m.direction === 'inbound');
+    allMessages = allMessages.concat(messages);
+    nextPageUrl = data.next_page_uri
+      ? `https://api.twilio.com${data.next_page_uri}`
+      : null;
+    await new Promise(resolve => setTimeout(resolve, 150)); // throttle
+  }
+
+  console.log(`[admin/backfill-wa-replies] ${allMessages.length} messages entrants trouvés côté Twilio`);
+
+  let inserted = 0;
+  let skipped  = 0;
+  const insertedList = [];
+
+  for (const msg of allMessages) {
+    const msgSid = msg.sid;
+    if (existingSids.has(msgSid)) { skipped++; continue; }
+
+    const fromRaw  = String(msg.from || '');
+    const fromE164 = fromRaw.replace(/^whatsapp:/, '').trim();
+    const body     = String(msg.body || '').trim();
+    const receivedAt = msg.date_sent || msg.date_created || new Date().toISOString();
+    const fromNorm = normalizeForMatch(fromE164);
+
+    // Cherche le lead "sent" le plus récent avec ce numéro
+    let match = null;
+    for (let i = processedLeads.length - 1; i >= 0; i--) {
+      const l = processedLeads[i];
+      if (l.status !== 'sent') continue;
+      if (!l.whatsappTo) continue;
+      if (normalizeForMatch(l.whatsappTo) === fromNorm) { match = l; break; }
+    }
+
+    const record = {
+      id: `wa-reply-backfill-${msgSid}`,
+      status: 'whatsapp_reply_received',
+      leadId:              match ? match.leadId      : null,
+      programId:           match ? match.programId   : null,
+      programName:         match ? match.programName : null,
+      contactName:         match ? match.contactName : null,
+      whatsappFrom:        fromE164,
+      whatsappBody:        body,
+      whatsappMessageSid:  msgSid,
+      whatsappProfileName: null,
+      relatedSentId:       match ? match.id : null,
+      matched:             !!match,
+      receivedAt,
+      processedAt:         new Date().toISOString(),
+      backfilled:          true,
+    };
+
+    processedLeads.push(record);
+    existingSids.add(msgSid);
+    inserted++;
+    insertedList.push({ sid: msgSid, from: fromE164, matched: !!match, leadId: match?.leadId || null, contactName: match?.contactName || null, receivedAt, body: body.slice(0, 80) });
+  }
+
+  saveProcessed();
+  console.log(`[admin/backfill-wa-replies] ✅ ${inserted} insérés, ${skipped} déjà présents`);
+  res.json({ total: allMessages.length, inserted, skipped, messages: insertedList });
+});
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
 app.get('/api/test/lead-dump', async (req, res) => {
