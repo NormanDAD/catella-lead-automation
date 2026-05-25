@@ -4482,6 +4482,7 @@ async function pollWhatsAppReplies() {
   }
 
   let inserted = 0;
+  const newRecords = [];
   for (const msg of allMessages) {
     const msgSid = msg.sid;
     if (existingSids.has(msgSid)) continue;
@@ -4498,7 +4499,7 @@ async function pollWhatsAppReplies() {
       if (normalizeForMatch(l.whatsappTo) === fromNorm) { match = l; break; }
     }
 
-    processedLeads.push({
+    const record = {
       id: `wa-reply-poll-${msgSid}`,
       status: 'whatsapp_reply_received',
       leadId:             match ? match.leadId      : null,
@@ -4514,7 +4515,9 @@ async function pollWhatsAppReplies() {
       receivedAt,
       processedAt:        now.toISOString(),
       backfilled:         true,
-    });
+    };
+    processedLeads.push(record);
+    newRecords.push(record);
     existingSids.add(msgSid);
     inserted++;
   }
@@ -4522,6 +4525,33 @@ async function pollWhatsAppReplies() {
   if (inserted > 0) {
     saveProcessed();
     console.log(`[wa-poll] ✅ ${inserted} nouvelles réponses WA injectées (${allMessages.length} scannées, ${pageCount} pages)`);
+
+    // Notif Telegram immédiate pour chaque nouveau message
+    for (const rec of newRecords) {
+      if (!rec.whatsappBody) continue;
+      try {
+        const adUrl = rec.leadId && rec.programId
+          ? `https://app.adlead.immo/catella/leads/${rec.programId}/${rec.leadId}`
+          : null;
+        const tgText = rec.matched
+          ? `📱 <b>RÉPONSE WhatsApp prospect — ACTION ADLEAD URGENTE</b>\n\n` +
+            `• <b>Prospect</b> : ${escapeTelegramHtml(rec.contactName || rec.whatsappFrom)}\n` +
+            `• <b>Programme</b> : ${escapeTelegramHtml(rec.programName || '—')}\n` +
+            `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
+            `• <b>Reçu le</b> : ${new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}\n\n` +
+            `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>\n\n` +
+            (adUrl ? `→ <a href="${adUrl}">Ouvrir dans Adlead</a>\n\n` : '') +
+            `<i>⚠️ Réponds depuis le dashboard ou pose une action Adlead.</i>`
+          : `📱 <b>WhatsApp inconnu</b> (lead non identifié)\n\n` +
+            `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
+            `• <b>Reçu le</b> : ${new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}\n\n` +
+            `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>`;
+        await sendTelegramNotification(tgText);
+      } catch (e) {
+        console.error('[wa-poll] notif Telegram échec:', e.message);
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
   } else {
     console.log(`[wa-poll] ✓ ${allMessages.length} messages scannés — rien de nouveau`);
   }
@@ -4533,5 +4563,5 @@ async function pollWhatsAppReplies() {
 
 // Lancement immédiat au démarrage (après 5s pour laisser le serveur s'initialiser)
 setTimeout(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur démarrage:', e.message)), 5000);
-// Puis toutes les heures
-setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 60 * 60 * 1000);
+// Puis toutes les 15 minutes (compromis réactivité / quota Twilio API)
+setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 15 * 60 * 1000);
