@@ -4424,3 +4424,114 @@ async function dailyHealthCheckCron() {
   await runDailyHealthCheck().catch(e => console.error('[daily-health] erreur:', e.message));
 }
 setInterval(dailyHealthCheckCron, 5 * 60 * 1000);
+
+// ─── AUTO-POLLING RÉPONSES WHATSAPP ─────────────────────────────────────────
+// Fallback critique : si le webhook Twilio n'est pas configuré (ou tombe),
+// ce polling récupère quand même toutes les réponses prospects toutes les heures.
+// Aussi lancé au démarrage pour rattraper les messages manqués.
+// Idempotent par SID — aucun doublon possible.
+const WA_POLL_META_FILE = path.join(DATA_DIR, 'wa_poll_meta.json');
+
+function loadWaPollMeta() {
+  try { return JSON.parse(fs.readFileSync(WA_POLL_META_FILE, 'utf8')); } catch { return {}; }
+}
+function saveWaPollMeta(meta) {
+  try { fs.writeFileSync(WA_POLL_META_FILE, JSON.stringify(meta, null, 2)); } catch {}
+}
+
+async function pollWhatsAppReplies() {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) return;
+  const meta = loadWaPollMeta();
+  const now = new Date();
+  console.log('[wa-poll] démarrage polling réponses WhatsApp entrants…');
+
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const existingSids = new Set(
+    processedLeads.filter(l => l.whatsappMessageSid).map(l => l.whatsappMessageSid)
+  );
+  const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
+
+  // Date de début : dernière exécution ou 90 jours en arrière (premier lancement)
+  const since = meta.lastPollAt
+    ? new Date(new Date(meta.lastPollAt).getTime() - 60 * 60 * 1000).toISOString().slice(0, 10) // overlap 1h
+    : new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  let allMessages = [];
+  const params = new URLSearchParams({ PageSize: '100' });
+  params.append('DateSent>', since);
+  let nextPageUrl = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?${params.toString()}`;
+  let pageCount = 0;
+
+  try {
+    while (nextPageUrl && pageCount < 30) {
+      const r = await fetch(nextPageUrl, { headers: { Authorization: `Basic ${auth}` } });
+      if (!r.ok) { console.error(`[wa-poll] Twilio API ${r.status}`); break; }
+      const data = await r.json();
+      const inbound = (data.messages || []).filter(m =>
+        m.direction === 'inbound' &&
+        (String(m.from || '').startsWith('whatsapp:') || String(m.to || '').startsWith('whatsapp:'))
+      );
+      allMessages = allMessages.concat(inbound);
+      nextPageUrl = data.next_page_uri ? `https://api.twilio.com${data.next_page_uri}` : null;
+      pageCount++;
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+  } catch (e) {
+    console.error('[wa-poll] erreur fetch Twilio:', e.message);
+    return;
+  }
+
+  let inserted = 0;
+  for (const msg of allMessages) {
+    const msgSid = msg.sid;
+    if (existingSids.has(msgSid)) continue;
+    const fromRaw  = String(msg.from || '');
+    const fromE164 = fromRaw.replace(/^whatsapp:/, '').trim();
+    const body     = String(msg.body || '').trim();
+    const receivedAt = msg.date_sent || msg.date_created || now.toISOString();
+    const fromNorm = normalizeForMatch(fromE164);
+
+    let match = null;
+    for (let i = processedLeads.length - 1; i >= 0; i--) {
+      const l = processedLeads[i];
+      if (l.status !== 'sent' || !l.whatsappTo) continue;
+      if (normalizeForMatch(l.whatsappTo) === fromNorm) { match = l; break; }
+    }
+
+    processedLeads.push({
+      id: `wa-reply-poll-${msgSid}`,
+      status: 'whatsapp_reply_received',
+      leadId:             match ? match.leadId      : null,
+      programId:          match ? match.programId   : null,
+      programName:        match ? match.programName : null,
+      contactName:        match ? match.contactName : null,
+      whatsappFrom:       fromE164,
+      whatsappBody:       body,
+      whatsappMessageSid: msgSid,
+      whatsappProfileName: null,
+      relatedSentId:      match ? match.id : null,
+      matched:            !!match,
+      receivedAt,
+      processedAt:        now.toISOString(),
+      backfilled:         true,
+    });
+    existingSids.add(msgSid);
+    inserted++;
+  }
+
+  if (inserted > 0) {
+    saveProcessed();
+    console.log(`[wa-poll] ✅ ${inserted} nouvelles réponses WA injectées (${allMessages.length} scannées, ${pageCount} pages)`);
+  } else {
+    console.log(`[wa-poll] ✓ ${allMessages.length} messages scannés — rien de nouveau`);
+  }
+
+  meta.lastPollAt = now.toISOString();
+  meta.lastInserted = inserted;
+  saveWaPollMeta(meta);
+}
+
+// Lancement immédiat au démarrage (après 5s pour laisser le serveur s'initialiser)
+setTimeout(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur démarrage:', e.message)), 5000);
+// Puis toutes les heures
+setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 60 * 60 * 1000);
