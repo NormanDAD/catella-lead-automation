@@ -2179,6 +2179,40 @@ app.post('/api/test/telegram', async (req, res) => {
   }
 });
 
+// POST /api/admin/notify-missed-wa-replies
+// Envoie une notif Telegram pour chaque réponse WhatsApp déjà en base mais pas encore notifiée.
+app.post('/api/admin/notify-missed-wa-replies', async (req, res) => {
+  const replies = processedLeads.filter(l =>
+    l.status === 'whatsapp_reply_received' && l.whatsappBody && !l.telegramNotified
+  );
+  let sent = 0, failed = 0;
+  for (const rec of replies) {
+    try {
+      const adUrl = rec.leadId && rec.programId
+        ? `https://app.adlead.immo/catella/leads/${rec.programId}/${rec.leadId}` : null;
+      const when = rec.receivedAt
+        ? new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+        : '—';
+      const tgText = rec.matched
+        ? `📱 <b>RÉPONSE WhatsApp — ${escapeTelegramHtml(rec.contactName || rec.whatsappFrom)}</b>\n\n` +
+          `• <b>Programme</b> : ${escapeTelegramHtml(rec.programName || '—')}\n` +
+          `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
+          `• <b>Reçu le</b> : ${when}\n\n` +
+          `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>\n\n` +
+          (adUrl ? `→ <a href="${adUrl}">Ouvrir dans Adlead</a>` : '')
+        : `📱 <b>WhatsApp inconnu</b>\n• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n• <b>Reçu le</b> : ${when}\n\n<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>`;
+      await sendTelegramNotification(tgText);
+      rec.telegramNotified = true;
+      sent++;
+      await new Promise(r => setTimeout(r, 400)); // évite flood Telegram
+    } catch (e) {
+      failed++;
+    }
+  }
+  if (sent > 0) saveProcessed();
+  res.json({ total: replies.length, sent, failed });
+});
+
 // Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
 // Usage : POST /api/test/adlead-update?programId=X&leadId=Y
 // Permet de vérifier les deux appels API Adlead sans repasser par le pipeline complet.
@@ -4696,5 +4730,5 @@ async function pollWhatsAppReplies() {
 
 // Lancement immédiat au démarrage (après 5s pour laisser le serveur s'initialiser)
 setTimeout(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur démarrage:', e.message)), 5000);
-// Puis toutes les 15 minutes (compromis réactivité / quota Twilio API)
-setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 15 * 60 * 1000);
+// Puis toutes les 5 minutes
+setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 5 * 60 * 1000);
