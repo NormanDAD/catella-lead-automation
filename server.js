@@ -129,6 +129,11 @@ const CONFIG = {
   // l'AUTH_TOKEN Twilio déjà configuré). TWILIO_VALIDATE_SIGNATURE=false pour bypass
   // en dev/debug uniquement.
   TWILIO_VALIDATE_SIGNATURE: process.env.TWILIO_VALIDATE_SIGNATURE !== 'false',
+  // URL de base publique du serveur, utilisée pour reconstruire l'URL exacte lors de la
+  // validation de signature Twilio. Railway ne transmet pas x-forwarded-host de façon fiable,
+  // ce qui faisait échouer la validation (URL reconstituée ≠ URL signée par Twilio).
+  // Valeur prod : https://lead-automation-production-33e8.up.railway.app
+  TWILIO_WEBHOOK_BASE_URL: process.env.TWILIO_WEBHOOK_BASE_URL || 'https://lead-automation-production-33e8.up.railway.app',
   // URL de callback Twilio pour le suivi de livraison WhatsApp (delivery tracking).
   // Twilio POST sur cette URL à chaque changement de statut : queued → sent → delivered → read → failed.
   // Si vide, aucun StatusCallback n'est envoyé à l'envoi. Valeur prod :
@@ -3333,9 +3338,12 @@ app.post('/webhook/twilio-status', express.urlencoded({ extended: false }), (req
 // pour bypass en dev/debug seulement).
 app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), async (req, res) => {
   // 1. Validation signature Twilio
-  const proto   = req.headers['x-forwarded-proto'] || 'https';
-  const host    = req.headers['x-forwarded-host'] || req.headers.host;
-  const fullUrl = `${proto}://${host}${req.originalUrl}`;
+  // Reconstruction URL exacte pour validation signature Twilio.
+  // TWILIO_WEBHOOK_BASE_URL hardcodé évite le problème Railway (x-forwarded-host absent).
+  const base    = (CONFIG.TWILIO_WEBHOOK_BASE_URL || '').replace(/\/$/, '');
+  const fullUrl = base
+    ? `${base}${req.originalUrl}`
+    : `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers['x-forwarded-host'] || req.headers.host}${req.originalUrl}`;
   if (CONFIG.TWILIO_VALIDATE_SIGNATURE) {
     if (!validateTwilioSignature(req, fullUrl)) {
       console.warn(`[webhook/whatsapp-incoming] signature Twilio invalide (url=${fullUrl}) — refusé`);
