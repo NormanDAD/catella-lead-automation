@@ -129,6 +129,10 @@ const CONFIG = {
   // l'AUTH_TOKEN Twilio déjà configuré). TWILIO_VALIDATE_SIGNATURE=false pour bypass
   // en dev/debug uniquement.
   TWILIO_VALIDATE_SIGNATURE: process.env.TWILIO_VALIDATE_SIGNATURE !== 'false',
+  // Slack Incoming Webhook URL pour le rapport quotidien de santé du pipeline.
+  // Créer via api.slack.com/apps → "Incoming Webhooks" → Add New Webhook → choisir le canal.
+  // Format : https://hooks.slack.com/services/T.../B.../...
+  SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL || '',
   // URL de base publique du serveur, utilisée pour reconstruire l'URL exacte lors de la
   // validation de signature Twilio. Railway ne transmet pas x-forwarded-host de façon fiable,
   // ce qui faisait échouer la validation (URL reconstituée ≠ URL signée par Twilio).
@@ -2528,56 +2532,50 @@ app.post('/api/admin/backfill-wa-status', async (req, res) => {
 });
 
 // POST /api/admin/backfill-whatsapp-replies
-// Interroge l'API Twilio pour récupérer tous les messages WhatsApp entrants (direction inbound)
-// et les injecte dans processedLeads comme s'ils avaient été reçus via webhook.
-// Idempotent : un SID déjà présent dans processedLeads n'est pas réinséré.
-// Paramètre optionnel : body JSON { dateSentAfter: "2026-01-01" } pour limiter la période.
+// Interroge l'API Twilio (SANS filtre To — pour ne rien rater) et injecte tous les
+// messages WhatsApp inbound dans processedLeads. Idempotent par SID.
+// Body JSON optionnel : { dateSentAfter: "2026-04-01" } pour limiter la plage de dates.
 app.post('/api/admin/backfill-whatsapp-replies', async (req, res) => {
-  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN || !CONFIG.TWILIO_WHATSAPP_FROM) {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) {
     return res.status(400).json({ error: 'Twilio non configuré' });
   }
   const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
-  const ourNumber = CONFIG.TWILIO_WHATSAPP_FROM.replace(/^whatsapp:/, '');
   const { dateSentAfter } = req.body || {};
 
-  // Récupère les SIDs déjà présents pour dédoublonnage
+  // SIDs déjà en base → dédoublonnage idempotent
   const existingSids = new Set(
-    processedLeads
-      .filter(l => l.whatsappMessageSid)
-      .map(l => l.whatsappMessageSid)
+    processedLeads.filter(l => l.whatsappMessageSid).map(l => l.whatsappMessageSid)
   );
 
   const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
-  const ourNorm = normalizeForMatch(ourNumber);
 
+  // Récupère TOUTES les pages (pas de filtre To — on filtre en local)
   let allMessages = [];
-  let nextPageUrl = null;
+  const params = new URLSearchParams({ PageSize: '100' });
+  // DateSent> = filtre Twilio "après cette date" (format YYYY-MM-DD)
+  if (dateSentAfter) params.append('DateSent>', dateSentAfter);
+  let nextPageUrl = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?${params.toString()}`;
 
-  // Première page
-  const initialParams = new URLSearchParams({
-    To: `whatsapp:${ourNumber}`,
-    PageSize: '100',
-  });
-  if (dateSentAfter) initialParams.set('DateSent>', dateSentAfter);
-  nextPageUrl = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?${initialParams.toString()}`;
-
-  // Pagination complète
-  while (nextPageUrl) {
+  let pageCount = 0;
+  while (nextPageUrl && pageCount < 50) { // garde-fou 50 pages max (5000 messages)
     const r = await fetch(nextPageUrl, { headers: { Authorization: `Basic ${auth}` } });
     if (!r.ok) {
       const errText = await r.text().catch(() => '');
-      return res.status(502).json({ error: `Twilio API ${r.status}`, detail: errText.slice(0, 200) });
+      return res.status(502).json({ error: `Twilio API ${r.status}`, detail: errText.slice(0, 300) });
     }
     const data = await r.json();
-    const messages = (data.messages || []).filter(m => m.direction === 'inbound');
-    allMessages = allMessages.concat(messages);
-    nextPageUrl = data.next_page_uri
-      ? `https://api.twilio.com${data.next_page_uri}`
-      : null;
-    await new Promise(resolve => setTimeout(resolve, 150)); // throttle
+    // Garde uniquement les messages WhatsApp inbound (from = whatsapp:+XX)
+    const inbound = (data.messages || []).filter(m =>
+      m.direction === 'inbound' &&
+      (String(m.from || '').startsWith('whatsapp:') || String(m.to || '').startsWith('whatsapp:'))
+    );
+    allMessages = allMessages.concat(inbound);
+    nextPageUrl = data.next_page_uri ? `https://api.twilio.com${data.next_page_uri}` : null;
+    pageCount++;
+    await new Promise(resolve => setTimeout(resolve, 120)); // throttle API Twilio
   }
 
-  console.log(`[admin/backfill-wa-replies] ${allMessages.length} messages entrants trouvés côté Twilio`);
+  console.log(`[admin/backfill-wa-replies] ${allMessages.length} messages WA inbound trouvés (${pageCount} pages Twilio)`);
 
   let inserted = 0;
   let skipped  = 0;
@@ -4244,3 +4242,185 @@ async function inboxSchedulerTick() {
 }
 setInterval(inboxSchedulerTick, CONFIG.REPLY_POLL_INTERVAL_MS);
 // Pas de tick initial — on attend que Norman ait fait l'auth.
+
+// ─── SLACK NOTIFICATIONS ────────────────────────────────────────────────────
+async function sendSlackNotification(blocks) {
+  if (!CONFIG.SLACK_WEBHOOK_URL) {
+    console.warn('[slack] SLACK_WEBHOOK_URL non configuré — notification ignorée');
+    return false;
+  }
+  try {
+    const r = await fetch(CONFIG.SLACK_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blocks }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text().catch(() => '')}`);
+    return true;
+  } catch (e) {
+    console.error('[slack] envoi échoué:', e.message);
+    return false;
+  }
+}
+
+// ─── DAILY HEALTH CHECK ─────────────────────────────────────────────────────
+// Vérifie chaque jour :
+//   1. Connexion Twilio (credentials valides)
+//   2. Webhook entrant configuré sur le numéro WhatsApp (URL correcte)
+//   3. Activité : réponses prospects reçues aujourd'hui + hier via Twilio
+//   4. Stats pipeline local : leads traités + en attente
+// Résultat envoyé sur Slack à 8h30 Paris.
+async function runDailyHealthCheck() {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: 'long', year: 'numeric' });
+  const checks = {};
+  const issues = [];
+
+  // ── 1. Twilio API connectivity + webhook URL check ─────────────────────────
+  if (CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN) {
+    try {
+      const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+      const r = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers.json?PageSize=20`,
+        { headers: { Authorization: `Basic ${auth}` } }
+      );
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const numbers = data.incoming_phone_numbers || [];
+      const ourRaw = (CONFIG.TWILIO_WHATSAPP_FROM || '').replace(/^whatsapp:/, '').trim();
+      const ourNum = numbers.find(n => n.phone_number === ourRaw || n.phone_number.replace(/\D/g, '') === ourRaw.replace(/\D/g, ''));
+      const expectedWebhook = `${CONFIG.TWILIO_WEBHOOK_BASE_URL}/webhook/whatsapp-incoming`;
+
+      checks.twilioApi = '✅ connecté';
+
+      if (ourNum) {
+        const configured = ourNum.sms_url || '';
+        if (configured === expectedWebhook) {
+          checks.webhookUrl = `✅ configuré (${configured})`;
+        } else if (configured) {
+          checks.webhookUrl = `⚠️ URL différente de celle attendue\n  • Actuelle : ${configured}\n  • Attendue : ${expectedWebhook}`;
+          issues.push('webhook URL différente de celle attendue');
+        } else {
+          checks.webhookUrl = `❌ aucun webhook configuré sur ${ourRaw}`;
+          issues.push('webhook entrant WhatsApp non configuré sur Twilio');
+        }
+      } else {
+        checks.webhookUrl = `⚠️ numéro ${ourRaw} introuvable dans les IncomingPhoneNumbers`;
+        issues.push('numéro WhatsApp introuvable dans Twilio — peut être un sender séparé');
+      }
+    } catch (e) {
+      checks.twilioApi = `❌ erreur : ${e.message}`;
+      checks.webhookUrl = '❌ non vérifié (connexion Twilio échouée)';
+      issues.push(`Twilio API inaccessible : ${e.message}`);
+    }
+  } else {
+    checks.twilioApi = '❌ credentials non configurés (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN manquants)';
+    checks.webhookUrl = '❌ non vérifié';
+    issues.push('Twilio non configuré');
+  }
+
+  // ── 2. Messages inbound reçus aujourd'hui et hier (via Twilio API) ──────────
+  try {
+    const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const todayParis = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' }); // "2026-05-25"
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?To=${encodeURIComponent(CONFIG.TWILIO_WHATSAPP_FROM)}&PageSize=100`;
+    const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+    if (r.ok) {
+      const data = await r.json();
+      const inbound = (data.messages || []).filter(m => m.direction === 'inbound');
+      const todayInbound = inbound.filter(m => (m.date_sent || m.date_created || '').startsWith(todayParis));
+      checks.inboundToday = todayInbound.length > 0
+        ? `✅ ${todayInbound.length} réponse(s) prospects reçue(s) aujourd'hui`
+        : `ℹ️ 0 réponse reçue aujourd'hui (normal si pas d'envoi la nuit)`;
+    } else {
+      checks.inboundToday = `⚠️ impossible de vérifier (HTTP ${r.status})`;
+    }
+  } catch (e) {
+    checks.inboundToday = `⚠️ erreur fetch Twilio : ${e.message}`;
+  }
+
+  // ── 3. Stats pipeline local ────────────────────────────────────────────────
+  const todayParis = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' });
+  const processedToday = processedLeads.filter(l =>
+    l.status === 'sent' && (l.processedAt || '').startsWith(todayParis)
+  ).length;
+  const repliesInApp = processedLeads.filter(l =>
+    l.status === 'whatsapp_reply_received' && (l.receivedAt || l.processedAt || '').startsWith(todayParis)
+  ).length;
+  const pendingCount = pendingLeads.length;
+
+  checks.pipelineStats = `📤 Leads traités aujourd'hui : ${processedToday} | ⏳ En attente : ${pendingCount} | 💬 Réponses enregistrées : ${repliesInApp}`;
+
+  // ── 4. Construction du message Slack ───────────────────────────────────────
+  const allGood = issues.length === 0;
+  const statusEmoji = allGood ? '✅' : '⚠️';
+  const statusText  = allGood ? 'Tout fonctionne aujourd\'hui' : `${issues.length} problème(s) détecté(s)`;
+
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `${statusEmoji} Pipeline Catella — ${statusText}`, emoji: true },
+    },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `Rapport automatique du *${dateStr}* · lead-automation Railway` }],
+    },
+    { type: 'divider' },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Twilio API*\n${checks.twilioApi}` },
+        { type: 'mrkdwn', text: `*Webhook entrant WhatsApp*\n${checks.webhookUrl}` },
+        { type: 'mrkdwn', text: `*Messages inbound Twilio*\n${checks.inboundToday}` },
+        { type: 'mrkdwn', text: `*Pipeline*\n${checks.pipelineStats}` },
+      ],
+    },
+  ];
+
+  if (!allGood) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*🚨 Problèmes à corriger :*\n${issues.map(i => `• ${i}`).join('\n')}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `<https://lead-automation-production-33e8.up.railway.app|🔗 Ouvrir le dashboard>`,
+    }],
+  });
+
+  const slackOk = await sendSlackNotification(blocks);
+  console.log(`[daily-health] ${statusText} — Slack: ${slackOk ? 'envoyé' : 'échec/désactivé'} — issues: [${issues.join(', ') || 'aucun'}]`);
+  return { allGood, issues, checks };
+}
+
+// Endpoint on-demand pour tester le health check immédiatement.
+app.post('/api/admin/daily-health-check', async (req, res) => {
+  try {
+    const result = await runDailyHealthCheck();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cron quotidien 8h30 Paris — même pattern que j15Cron / j3mCron.
+let healthCheckLastRun = null;
+async function dailyHealthCheckCron() {
+  const nowParis = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
+  const [h, m] = nowParis.split(':').map(Number);
+  if (h !== 8 || m < 30 || m > 34) return; // fenêtre 8h30-8h34 (tick toutes les 5 min)
+  const todayKey = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' });
+  if (healthCheckLastRun === todayKey) return; // déjà tourné aujourd'hui
+  healthCheckLastRun = todayKey;
+  console.log('[daily-health] lancement du health check quotidien 8h30 Paris');
+  await runDailyHealthCheck().catch(e => console.error('[daily-health] erreur:', e.message));
+}
+setInterval(dailyHealthCheckCron, 5 * 60 * 1000);
