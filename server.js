@@ -3011,6 +3011,129 @@ app.get('/api/whatsapp/conversations', (req, res) => {
   res.json(conversations);
 });
 
+// GET /conversations — page autonome (pas de modal, pas de CSS complexe)
+app.get('/conversations', (req, res) => {
+  const convMap = {};
+  for (const l of processedLeads) {
+    let phone = null, direction = null;
+    if (l.status === 'sent' && l.whatsappSid && l.whatsappTo)           { phone = l.whatsappTo;   direction = 'out'; }
+    else if (l.status === 'whatsapp_reply_received' && l.whatsappFrom)  { phone = l.whatsappFrom; direction = 'in';  }
+    else if (l.status === 'whatsapp_reply_sent' && l.whatsappTo)        { phone = l.whatsappTo;   direction = 'out'; }
+    if (!phone) continue;
+    if (!convMap[phone]) convMap[phone] = { phone, contactName: null, programName: null, leadId: null, programId: null, messages: [], lastActivity: null, lastInboundAt: null };
+    const conv = convMap[phone];
+    if (l.contactName && !conv.contactName) conv.contactName = l.contactName;
+    if (l.programName && !conv.programName) conv.programName = l.programName;
+    if (l.leadId      && !conv.leadId)      conv.leadId      = l.leadId;
+    if (l.programId   && !conv.programId)   conv.programId   = l.programId;
+    const t = l.processedAt || l.receivedAt || l.sentAt;
+    conv.messages.push({ direction, body: l.whatsappBody || '', time: t, isTemplate: l.status === 'sent' });
+    if (!conv.lastActivity || t > conv.lastActivity) conv.lastActivity = t;
+    if (direction === 'in' && (!conv.lastInboundAt || t > conv.lastInboundAt)) conv.lastInboundAt = t;
+  }
+
+  const convs = Object.values(convMap)
+    .filter(c => c.messages.some(m => m.direction === 'in'))
+    .map(c => {
+      c.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
+      const exp = c.lastInboundAt ? new Date(new Date(c.lastInboundAt).getTime() + 86400000).toISOString() : null;
+      return { ...c, windowOpen: exp ? new Date() < new Date(exp) : false, windowExpiresAt: exp };
+    })
+    .sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+
+  const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const fmtDate = iso => { if (!iso) return '—'; const d = new Date(iso); return d.toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); };
+
+  const cardsHtml = convs.map((c, i) => {
+    const name = c.contactName || c.phone || '—';
+    const prog = c.programName || '—';
+    const adUrl = c.leadId && c.programId ? `https://app.adlead.immo/catella/leads/${c.programId}/${c.leadId}` : null;
+    const windowBadge = c.windowOpen
+      ? '<span style="background:#e8f7ee;color:#1d7a3a;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">✓ Fenêtre ouverte — tu peux répondre</span>'
+      : '<span style="background:#f0f0f2;color:#6e6e73;padding:2px 10px;border-radius:20px;font-size:12px;">Fenêtre expirée</span>';
+
+    const bubblesHtml = c.messages.map(m => {
+      const isIn = m.direction === 'in';
+      const bg  = m.isTemplate ? '#f5f5f7' : (isIn ? '#dcf8c6' : '#e5f1ff');
+      const col = '#1d1d1f';
+      const align = isIn ? 'left' : 'right';
+      const margin = isIn ? 'margin-right:60px' : 'margin-left:60px';
+      return `<div style="background:${bg};color:${col};padding:10px 14px;border-radius:12px;margin:4px 0;${margin};text-align:${align};">
+        ${m.isTemplate ? '<em style="color:#6e6e73;">(message auto envoyé)</em>' : esc(m.body || '(image ou fichier)')}
+        <div style="font-size:11px;color:#6e6e73;margin-top:4px;">${fmtDate(m.time)}</div>
+      </div>`;
+    }).join('');
+
+    const replyInput = c.windowOpen ? `
+      <form method="POST" action="/conversations/reply" style="display:flex;gap:8px;margin-top:12px;">
+        <input type="hidden" name="to" value="${esc(c.phone)}">
+        <input type="hidden" name="leadId" value="${esc(c.leadId || '')}">
+        <input type="hidden" name="programId" value="${esc(c.programId || '')}">
+        <input type="hidden" name="contactName" value="${esc(c.contactName || '')}">
+        <input type="hidden" name="programName" value="${esc(c.programName || '')}">
+        <textarea name="body" placeholder="Écrire un message…" rows="2" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit;"></textarea>
+        <button type="submit" style="padding:10px 20px;background:#25D366;color:white;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">Envoyer</button>
+      </form>` : `<p style="color:#6e6e73;font-size:13px;margin-top:8px;">Fenêtre 24h expirée — impossible de répondre en message libre (règle Meta).</p>`;
+
+    return `<div style="background:white;border:1px solid #e5e5ea;border-radius:12px;padding:16px;margin-bottom:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <div>
+          <div style="font-weight:700;font-size:16px;color:#1d1d1f;">${esc(name)}</div>
+          <div style="font-size:13px;color:#6e6e73;margin-top:2px;">${esc(prog)} · ${esc(c.phone)}</div>
+          ${adUrl ? `<a href="${esc(adUrl)}" target="_blank" style="font-size:12px;color:#0070f3;">Ouvrir dans Adlead ↗</a>` : ''}
+        </div>
+        ${windowBadge}
+      </div>
+      <div style="background:#f5f5f7;border-radius:8px;padding:12px;">${bubblesHtml || '<em style="color:#6e6e73;">Aucun message texte</em>'}</div>
+      ${replyInput}
+    </div>`;
+  }).join('');
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conversations WhatsApp — Catella</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f7; margin: 0; padding: 0; color: #1d1d1f; }
+    .header { background: white; padding: 16px 24px; border-bottom: 1px solid #e5e5ea; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+    .container { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+    button:hover { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <strong style="font-size:18px;">💬 Conversations WhatsApp</strong>
+      <div style="font-size:13px;color:#6e6e73;margin-top:2px;">${convs.length} conversation${convs.length !== 1 ? 's' : ''} · ${new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}</div>
+    </div>
+    <a href="/" style="font-size:13px;color:#0070f3;text-decoration:none;">← Dashboard</a>
+  </div>
+  <div class="container">
+    ${convs.length ? cardsHtml : '<div style="text-align:center;padding:60px;color:#6e6e73;">Aucune réponse WhatsApp reçue pour le moment.</div>'}
+  </div>
+  <script>setTimeout(() => location.reload(), 60000);</script>
+</body>
+</html>`);
+});
+
+// POST /conversations/reply — traite la réponse envoyée depuis /conversations
+app.post('/conversations/reply', express.urlencoded({ extended: false }), async (req, res) => {
+  const { to, body, leadId, programId, contactName, programName } = req.body || {};
+  if (!to || !body) return res.redirect('/conversations?err=missing');
+  try {
+    const resp = await sendWhatsAppViaTwilio(to, body);
+    processedLeads.push({ id: `wa-sent-${Date.now()}`, status: 'whatsapp_reply_sent', leadId: leadId || null, programId: programId || null, programName: programName || null, contactName: contactName || null, whatsappTo: to, whatsappBody: body, whatsappSid: resp.sid || null, processedAt: new Date().toISOString() });
+    saveProcessed();
+    res.redirect('/conversations?sent=1');
+  } catch (e) {
+    res.redirect(`/conversations?err=${encodeURIComponent(e.message)}`);
+  }
+});
+
 // POST /api/whatsapp/reply
 // Envoie un message libre à un prospect (dans la fenêtre 24h Meta) et le stocke.
 app.post('/api/whatsapp/reply', async (req, res) => {
