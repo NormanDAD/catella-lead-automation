@@ -414,7 +414,17 @@ function saveProcessed() { saveJsonFile(PROCESSED_FILE, processedLeads); }
 
 // ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  },
+}));
 
 // ─── HELPERS ────────────────────────────────────────────────────────────────
 
