@@ -205,6 +205,7 @@ const CONFIG = {
   //   aucun lead. Le webhook continue à encaisser (rien n'est perdu), mais
   //   ni mail prospect ni notif interne ni WhatsApp ne partent.
   PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
+  ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
   PORT:                  process.env.PORT || 3000,
 };
 
@@ -269,6 +270,7 @@ function findProgramme(name) {
 const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(__dirname, 'data');
+const BROCHURES_DIR = path.join(DATA_DIR, 'brochures');
 const PENDING_FILE = path.join(DATA_DIR, 'pending_leads.json');
 const PROCESSED_FILE = path.join(DATA_DIR, 'processed_leads.json');
 const PROGRAM_NAME_CACHE_FILE = path.join(DATA_DIR, 'program_name_cache.json');
@@ -316,6 +318,25 @@ if (_dirCheck.ok) {
 } else {
   console.error(`[persistence] ⚠️  DATA_DIR=${DATA_DIR} NON ACCESSIBLE EN ÉCRITURE: ${_dirCheck.error}`);
   console.error(`[persistence] ⚠️  La file ne sera PAS persistée — corriger avant la prod.`);
+}
+
+// ─── BROCHURES ───────────────────────────────────────────────────────────────
+// brochures.json : { "Nom Programme": "slug.pdf" } — généré par scripts/build-brochures.js
+// Fichiers servis depuis BROCHURES_DIR (= DATA_DIR/brochures) uploadés via /api/admin/upload-brochure.
+let BROCHURES = {};
+try { BROCHURES = JSON.parse(fs.readFileSync(path.join(__dirname, 'brochures.json'), 'utf8')); } catch (_) {}
+
+function _normBrochureKey(s) {
+  return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+const BROCHURES_NORM = Object.fromEntries(Object.entries(BROCHURES).map(([k, v]) => [_normBrochureKey(k), v]));
+
+function getBrochureUrl(programName) {
+  if (!programName) return null;
+  const slug = BROCHURES[programName] || BROCHURES_NORM[_normBrochureKey(programName)];
+  if (!slug) return null;
+  const base = (CONFIG.TWILIO_WEBHOOK_BASE_URL || '').replace(/\/$/, '');
+  return base ? `${base}/brochures/${slug}` : null;
 }
 
 let pendingLeads = loadJsonFile(PENDING_FILE, []);
@@ -425,6 +446,37 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
   },
 }));
+
+// ─── BROCHURES — service des PDFs depuis le volume Railway ──────────────────
+app.get('/brochures/:filename', (req, res) => {
+  const filename = path.basename(req.params.filename);
+  if (!filename.endsWith('.pdf')) return res.status(400).end();
+  const filePath = path.join(BROCHURES_DIR, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  fs.createReadStream(filePath).pipe(res);
+});
+
+// POST /api/admin/upload-brochure?filename=slug.pdf
+// Corps : application/octet-stream (le PDF brut). Auth : x-admin-token.
+app.post('/api/admin/upload-brochure', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const filename = path.basename(req.query.filename || '');
+  if (!filename || !filename.endsWith('.pdf')) {
+    return res.status(400).json({ error: 'filename must end in .pdf' });
+  }
+  fs.mkdirSync(BROCHURES_DIR, { recursive: true });
+  const ws = fs.createWriteStream(path.join(BROCHURES_DIR, filename));
+  let bytes = 0;
+  req.on('data', chunk => { bytes += chunk.length; });
+  req.pipe(ws);
+  ws.on('finish', () => res.json({ ok: true, filename, bytes }));
+  ws.on('error', e => res.status(500).json({ error: e.message }));
+});
 
 // ─── HELPERS ────────────────────────────────────────────────────────────────
 
@@ -923,7 +975,7 @@ function buildEmailBody(ctx) {
 <p>Bonjour ${escapeHtml(ctx.salutation)},</p>
 
 <p>Merci pour l'intérêt que vous portez à notre programme <strong>&laquo;&nbsp;${escapeHtml(ctx.programme)}&nbsp;&raquo;</strong> à ${escapeHtml(ctx.ville)}, proposé par ${escapeHtml(ctx.promoteur)}.${accrochePhrase}</p>
-
+${brochureButton(ctx.brochureUrl)}
 <p>Pour vous proposer les appartements les plus adaptés, j'aurais besoin de quelques précisions sur votre recherche :</p>
 
 <ul style="margin: 8px 0 16px 0; padding-left: 22px;">
@@ -967,6 +1019,13 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function brochureButton(url) {
+  if (!url) return '';
+  return `<p style="margin:20px 0 16px;">
+  <a href="${url}" style="display:inline-block;background:#1a3a5c;color:#fff;padding:10px 22px;border-radius:4px;text-decoration:none;font-size:13px;font-weight:600;">📄 Télécharger la brochure du programme</a>
+</p>`;
 }
 
 // ─── ENVOI VIA POWER AUTOMATE ───────────────────────────────────────────────
@@ -1583,6 +1642,7 @@ async function processPendingLead(entry) {
       promoteur,
       accroche_programme: accroche,
       lien_rdv: CONFIG.BOOKING_URL,
+      brochureUrl: getBrochureUrl(programName),
     };
 
     const subject = buildEmailSubject(ctx);
@@ -1703,11 +1763,13 @@ async function processPendingLead(entry) {
             ville,
             lien_rdv: CONFIG.BOOKING_URL,
           });
+          const _j1BrochureUrl = getBrochureUrl(programName);
           const sendOptions = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? {
             templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
             contentVariables: {
-              "1": firstname || 'bonjour',  // fallback si pas de prénom (rare mais possible)
+              "1": firstname || 'bonjour',
               "2": programName || 'votre projet',
+              ...(_j1BrochureUrl ? { "3": _j1BrochureUrl } : {}),
             },
           } : {};
           const resp = await sendWhatsAppViaTwilio(phoneE164, body, sendOptions);
@@ -3721,11 +3783,12 @@ function isJ15Candidate(record, now) {
 
 // ─── Templates email règle 3 (3 jours : J+15 / J+16 / J+17) ─────────────────
 
-function buildJ15Day1Email(firstName, programName) {
+function buildJ15Day1Email(firstName, programName, brochureUrl) {
   const subject = `${programName} — votre dossier toujours actif ?`;
   const html = `<p>Bonjour ${firstName},</p>
 <p>Cela fait maintenant 2 semaines que je tentais de vous joindre concernant votre demande sur ${programName}. Je n'ai pas eu votre retour à mes messages précédents.</p>
 <p>Avant de classer définitivement votre dossier, je souhaitais m'assurer qu'on ne passait pas à côté d'une opportunité pour vous. Le programme évolue toujours et il reste actuellement des biens disponibles.</p>
+${brochureUrl ? `<p>Pour vous permettre de vous replonger dans le programme, je vous partage à nouveau la brochure :${brochureButton(brochureUrl)}</p>` : ''}
 <p>Un mot de vous suffit pour que je vous transmette les éléments à jour.</p>
 <p>Très cordialement,<br/>
 Norman DADON<br/>
@@ -3832,7 +3895,7 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   let channel, subject = null, html = null, whatsappTo = null;
   if (dayNumber === 1) {
     channel = 'email';
-    ({ subject, html } = buildJ15Day1Email(firstName, programName));
+    ({ subject, html } = buildJ15Day1Email(firstName, programName, getBrochureUrl(programName)));
   } else if (dayNumber === 2) {
     if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_J16) {
       channel = 'whatsapp';
@@ -3864,9 +3927,10 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   } else if (channel === 'whatsapp') {
     if (whatsappTo) {
       try {
+        const _j16BrochureUrl = getBrochureUrl(programName);
         const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_J16,
-          contentVariables: { '1': firstName, '2': programName },
+          contentVariables: { '1': firstName, '2': programName, ...(_j16BrochureUrl ? { '3': _j16BrochureUrl } : {}) },
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
@@ -4097,10 +4161,11 @@ function isJ3MCandidate(record, now) {
   return false;
 }
 
-function buildJ3MEmailDay1(firstName, programName) {
+function buildJ3MEmailDay1(firstName, programName, brochureUrl) {
   const subject = `Petit point sur votre demande ${programName}`;
   const html = `<p>Bonjour ${firstName},</p>
 <p>Petit point rapide concernant votre demande pour ${programName}. Je n'ai pas encore eu votre retour suite à mes premiers messages, et je préférais m'assurer que vous les avez bien reçus.</p>
+${brochureUrl ? `<p>En attendant notre échange, retrouvez ici la brochure du programme :${brochureButton(brochureUrl)}</p>` : ''}
 <p>Avez-vous quelques minutes pour qu'on échange brièvement de votre projet ? Vous pouvez réserver un créneau directement ici :<br/>
 <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
 <p>Au plaisir d'échanger,<br/>
@@ -4220,7 +4285,7 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   let channel, subject = null, html = null, whatsappTo = null;
   if (dayNumber === 1) {
     channel = 'email';
-    ({ subject, html } = buildJ3MEmailDay1(firstName, programName));
+    ({ subject, html } = buildJ3MEmailDay1(firstName, programName, getBrochureUrl(programName)));
   } else if (dayNumber === 2) {
     if (CONFIG.WHATSAPP_J3M_ENABLED && CONFIG.TWILIO_TEMPLATE_J3M_DAY2) {
       channel = 'whatsapp';
@@ -4254,9 +4319,10 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   } else if (channel === 'whatsapp') {
     if (whatsappTo) {
       try {
+        const _j3mBrochureUrl = getBrochureUrl(programName);
         const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
-          contentVariables: { '1': firstName, '2': programName },
+          contentVariables: { '1': firstName, '2': programName, ...(_j3mBrochureUrl ? { '3': _j3mBrochureUrl } : {}) },
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
