@@ -3385,15 +3385,15 @@ app.get('/conversations', (req, res) => {
     }).join('');
 
     const replyInput = c.windowOpen ? `
-      <form method="POST" action="/conversations/reply" style="display:flex;gap:8px;margin-top:12px;">
-        <input type="hidden" name="to" value="${esc(c.phone)}">
-        <input type="hidden" name="leadId" value="${esc(c.leadId || '')}">
-        <input type="hidden" name="programId" value="${esc(c.programId || '')}">
-        <input type="hidden" name="contactName" value="${esc(c.contactName || '')}">
-        <input type="hidden" name="programName" value="${esc(c.programName || '')}">
-        <textarea name="body" placeholder="Écrire un message…" rows="2" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit;"></textarea>
-        <button type="submit" style="padding:10px 20px;background:#25D366;color:white;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">Envoyer</button>
-      </form>` : `<p style="color:#6e6e73;font-size:13px;margin-top:8px;">Fenêtre 24h expirée — impossible de répondre en message libre (règle Meta).</p>`;
+      <div class="reply-form" style="display:flex;gap:8px;margin-top:12px;"
+        data-phone="${esc(c.phone)}"
+        data-lead-id="${esc(c.leadId || '')}"
+        data-program-id="${esc(c.programId || '')}"
+        data-contact-name="${esc(c.contactName || '')}"
+        data-program-name="${esc(c.programName || '')}">
+        <textarea placeholder="Écrire un message…" rows="2" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;"></textarea>
+        <button style="padding:10px 20px;background:#25D366;color:white;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">Envoyer</button>
+      </div>` : `<p style="color:#6e6e73;font-size:13px;margin-top:8px;">Fenêtre 24h expirée — impossible de répondre en message libre (règle Meta).</p>`;
 
     return `<div style="background:white;border:1px solid #e5e5ea;border-radius:12px;padding:16px;margin-bottom:20px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
@@ -3435,7 +3435,60 @@ app.get('/conversations', (req, res) => {
   <div class="container">
     ${convs.length ? cardsHtml : '<div style="text-align:center;padding:60px;color:#6e6e73;">Aucune réponse WhatsApp reçue pour le moment.</div>'}
   </div>
-  <script>setTimeout(() => location.reload(), 60000);</script>
+  <script>
+    setTimeout(() => location.reload(), 60000);
+
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.reply-form button');
+      if (!btn) return;
+      const form = btn.closest('.reply-form');
+      const textarea = form.querySelector('textarea');
+      const body = textarea.value.trim();
+      if (!body) return;
+
+      btn.disabled = true;
+      btn.textContent = '…';
+
+      const payload = {
+        to:          form.dataset.phone,
+        body,
+        leadId:      form.dataset.leadId,
+        programId:   form.dataset.programId,
+        contactName: form.dataset.contactName,
+        programName: form.dataset.programName,
+      };
+
+      try {
+        const r = await fetch('/api/whatsapp/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const json = await r.json();
+        if (!r.ok || !json.ok) throw new Error(json.error || r.status);
+
+        // Append sent bubble to the messages container above this form
+        const container = form.previousElementSibling;
+        if (container) {
+          const now = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+          const bubble = document.createElement('div');
+          bubble.style.cssText = 'background:#dcf8c6;color:#1d1d1f;padding:10px 14px;border-radius:12px;margin:4px 0;margin-left:60px;text-align:right;';
+          bubble.innerHTML = body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') +
+            '<div style="font-size:11px;color:#6e6e73;margin-top:4px;">' + now + '</div>';
+          container.appendChild(bubble);
+          container.scrollTop = container.scrollHeight;
+        }
+
+        textarea.value = '';
+        btn.textContent = '✓';
+        setTimeout(() => { btn.textContent = 'Envoyer'; btn.disabled = false; }, 2000);
+      } catch (err) {
+        btn.textContent = 'Erreur';
+        btn.style.background = '#ff3b30';
+        setTimeout(() => { btn.textContent = 'Envoyer'; btn.style.background = '#25D366'; btn.disabled = false; }, 3000);
+      }
+    });
+  </script>
 </body>
 </html>`);
 });
