@@ -2762,6 +2762,147 @@ app.post('/api/admin/backfill-whatsapp-replies', async (req, res) => {
   console.log(`[admin/backfill-wa-replies] ✅ ${inserted} insérés, ${skipped} déjà présents`);
   res.json({ total: allMessages.length, inserted, skipped, messages: insertedList });
 });
+
+// POST /api/admin/rebuild-wa-conversations
+// Reconstruit processedLeads (messages WA) depuis l'historique Twilio complet.
+// Récupère outbound + inbound, dédoublonne par SID, matche les numéros avec pendingLeads.
+// Idempotent. Paramètre optionnel : { dateSentAfter: "2026-01-01" }
+app.post('/api/admin/rebuild-wa-conversations', async (req, res) => {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) {
+    return res.status(400).json({ error: 'Twilio non configuré' });
+  }
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const { dateSentAfter } = req.body || {};
+
+  const existingSids = new Set(
+    processedLeads.flatMap(l => [l.whatsappSid, l.whatsappMessageSid].filter(Boolean))
+  );
+
+  const normalizePhone = (s) => String(s || '').replace(/[^\d+]/g, '');
+
+  // Index pendingLeads par numéro normalisé pour enrichir le contexte
+  const phoneIndex = {};
+  for (const l of pendingLeads) {
+    if (l.whatsappTo) {
+      const norm = normalizePhone(l.whatsappTo);
+      if (norm) phoneIndex[norm] = { contactName: l.contactName, programName: l.programName, leadId: l.leadId, programId: l.programId };
+    }
+  }
+  // Aussi indexer les processedLeads déjà présents
+  for (const l of processedLeads) {
+    const phone = l.whatsappTo || l.whatsappFrom;
+    if (phone && (l.contactName || l.programName)) {
+      const norm = normalizePhone(phone);
+      if (norm && !phoneIndex[norm]) {
+        phoneIndex[norm] = { contactName: l.contactName, programName: l.programName, leadId: l.leadId, programId: l.programId };
+      }
+    }
+  }
+
+  // Récupère toutes les pages Twilio
+  async function fetchAllMessages() {
+    const params = new URLSearchParams({ PageSize: '100' });
+    if (dateSentAfter) params.append('DateSent>', dateSentAfter);
+    let url = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?${params}`;
+    const all = [];
+    let pages = 0;
+    while (url && pages < 100) {
+      const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+      if (!r.ok) throw new Error(`Twilio ${r.status}: ${await r.text().catch(() => '')}`);
+      const data = await r.json();
+      const waMessages = (data.messages || []).filter(m =>
+        String(m.from || '').startsWith('whatsapp:') || String(m.to || '').startsWith('whatsapp:')
+      );
+      all.push(...waMessages);
+      url = data.next_page_uri ? `https://api.twilio.com${data.next_page_uri}` : null;
+      pages++;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return all;
+  }
+
+  let allMessages;
+  try {
+    allMessages = await fetchAllMessages();
+  } catch (e) {
+    return res.status(502).json({ error: e.message });
+  }
+
+  console.log(`[rebuild-wa-conv] ${allMessages.length} messages WA Twilio récupérés`);
+
+  let inserted = 0, skipped = 0;
+  const ourNumber = (CONFIG.TWILIO_WHATSAPP_FROM || '').replace(/^whatsapp:/, '');
+
+  for (const msg of allMessages) {
+    const sid = msg.sid;
+    if (existingSids.has(sid)) { skipped++; continue; }
+
+    const fromRaw = String(msg.from || '').replace(/^whatsapp:/, '');
+    const toRaw   = String(msg.to   || '').replace(/^whatsapp:/, '');
+    const body    = String(msg.body || '').trim();
+    const time    = msg.date_sent || msg.date_created || new Date().toISOString();
+    const isInbound  = msg.direction === 'inbound';
+    const isOutbound = msg.direction === 'outbound-api' || msg.direction === 'outbound-reply';
+
+    if (!isInbound && !isOutbound) { skipped++; continue; }
+
+    const prospectPhone = isInbound ? fromRaw : toRaw;
+    const norm          = normalizePhone(prospectPhone);
+    const ctx           = phoneIndex[norm] || {};
+
+    let record;
+    if (isOutbound) {
+      record = {
+        id:                    `wa-out-${sid}`,
+        status:                'sent',
+        leadId:                ctx.leadId    || null,
+        programId:             ctx.programId || null,
+        programName:           ctx.programName || null,
+        contactName:           ctx.contactName || null,
+        whatsappSid:           sid,
+        whatsappTo:            prospectPhone,
+        whatsappBody:          body,
+        whatsappDeliveryStatus: msg.status || null,
+        processedAt:           time,
+        rebuilt:               true,
+      };
+    } else {
+      record = {
+        id:                    `wa-reply-${sid}`,
+        status:                'whatsapp_reply_received',
+        leadId:                ctx.leadId    || null,
+        programId:             ctx.programId || null,
+        programName:           ctx.programName || null,
+        contactName:           ctx.contactName || null,
+        whatsappFrom:          prospectPhone,
+        whatsappBody:          body,
+        whatsappMessageSid:    sid,
+        whatsappProfileName:   msg.from_formatted || null,
+        receivedAt:            time,
+        processedAt:           time,
+        rebuilt:               true,
+      };
+    }
+
+    processedLeads.push(record);
+    existingSids.add(sid);
+    // Enrichir phoneIndex si on a un ctx depuis un outbound qu'on vient d'insérer
+    if (isOutbound && !phoneIndex[norm] && (ctx.contactName || ctx.programName)) {
+      phoneIndex[norm] = ctx;
+    }
+    inserted++;
+  }
+
+  saveProcessed();
+  const byPhone = {};
+  for (const l of processedLeads) {
+    const p = l.whatsappTo || l.whatsappFrom;
+    if (p) byPhone[p] = true;
+  }
+  console.log(`[rebuild-wa-conv] ✅ ${inserted} insérés, ${skipped} déjà présents, ${Object.keys(byPhone).length} numéros uniques`);
+  res.json({ total: allMessages.length, inserted, skipped, phones: Object.keys(byPhone).length });
+});
+
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
 app.get('/api/test/lead-dump', async (req, res) => {
