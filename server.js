@@ -4171,13 +4171,14 @@ function isJ15Candidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j15Relances || 0;
-  // Fenêtre ouverte à droite jusqu'à 30 jours pour éviter qu'un lead skippé
-  // (last_interaction_at récent) soit définitivement raté si la fenêtre [n+15,n+16[
-  // passe avant que last_interaction_at atteigne 15j. La protection anti-doublon
-  // vient de lastJ15RunYmd (1 exécution max par jour), pas de la fenêtre haute.
-  if (n === 0 && ageDays >= 15 && ageDays < 30) return true; // J+15+
-  if (n === 1 && ageDays >= 16 && ageDays < 30) return true; // J+16+
-  if (n === 2 && ageDays >= 17 && ageDays < 30) return true; // J+17+
+  // Fenêtre stricte [n+15, n+16[ depuis processedAt — limite les appels Adlead à ~1/lead/jour.
+  // Si last_interaction_at plus récent repousse l'éligibilité, processJ15Candidate pose
+  // record.j15RetryAfter (date YYYY-MM-DD) et on re-candidate à cette date.
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  if (record.j15RetryAfter && todayYmd >= record.j15RetryAfter && n < 3) return true;
+  if (n === 0 && ageDays >= 15 && ageDays < 16) return true;
+  if (n === 1 && ageDays >= 16 && ageDays < 17) return true;
+  if (n === 2 && ageDays >= 17 && ageDays < 18) return true;
   return false;
 }
 
@@ -4252,16 +4253,26 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   }
   const daysSinceLastAction = (Date.now() - new Date(j15RefDate).getTime()) / (1000 * 60 * 60 * 24);
   const currentCount = record.j15Relances || 0;
+  const thresholds = [15, 16, 17];
+  const threshold = thresholds[currentCount] ?? 99;
   let dayNumber;
   if (currentCount === 0 && daysSinceLastAction >= 15) dayNumber = 1;
   else if (currentCount === 1 && daysSinceLastAction >= 16) dayNumber = 2;
   else if (currentCount === 2 && daysSinceLastAction >= 17) dayNumber = 3;
   else {
+    // Stocker la date à laquelle ce lead redeviendra éligible (évite fenêtre manquée).
+    const daysLeft = threshold - daysSinceLastAction;
+    const retryDate = new Date(Date.now() + daysLeft * 86400000).toISOString().slice(0, 10);
+    if (!record.j15RetryAfter || retryDate < record.j15RetryAfter) {
+      record.j15RetryAfter = retryDate;
+    }
     return {
       skipped: true,
-      reason: `pas de relance prévue (j15Relances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)})`,
+      reason: `pas de relance prévue (j15Relances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)}, retryAfter=${record.j15RetryAfter})`,
     };
   }
+  // Relance envoyée → effacer le retryAfter
+  record.j15RetryAfter = null;
 
   // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;
@@ -4554,11 +4565,12 @@ function isJ3MCandidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j3mRelances || 0;
-  // Fenêtre ouverte à droite (même raison que isJ15Candidate) : évite qu'un lead
-  // skippé un jour soit définitivement raté si last_interaction_at change la donne.
-  if (n === 0 && ageDays >= 3  && ageDays < 15) return true; // J+3+
-  if (n === 1 && ageDays >= 4  && ageDays < 15) return true; // J+4+
-  if (n === 2 && ageDays >= 5  && ageDays < 15) return true; // J+5+
+  // Fenêtre stricte [n+3, n+4[ + retryAfter pour ne pas rater les leads skippés.
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  if (record.j3mRetryAfter && todayYmd >= record.j3mRetryAfter && n < 3) return true;
+  if (n === 0 && ageDays >= 3 && ageDays < 4) return true;
+  if (n === 1 && ageDays >= 4 && ageDays < 5) return true;
+  if (n === 2 && ageDays >= 5 && ageDays < 6) return true;
   return false;
 }
 
@@ -4645,16 +4657,24 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   }
   const daysSinceLastAction = (Date.now() - new Date(j3mRefDate).getTime()) / (1000 * 60 * 60 * 24);
   const currentCount = record.j3mRelances || 0;
+  const j3mThresholds = [3, 4, 5];
+  const j3mThreshold = j3mThresholds[currentCount] ?? 99;
   let dayNumber;
   if (currentCount === 0 && daysSinceLastAction >= 3) dayNumber = 1;
   else if (currentCount === 1 && daysSinceLastAction >= 4) dayNumber = 2;
   else if (currentCount === 2 && daysSinceLastAction >= 5) dayNumber = 3;
   else {
+    const daysLeft = j3mThreshold - daysSinceLastAction;
+    const retryDate = new Date(Date.now() + daysLeft * 86400000).toISOString().slice(0, 10);
+    if (!record.j3mRetryAfter || retryDate < record.j3mRetryAfter) {
+      record.j3mRetryAfter = retryDate;
+    }
     return {
       skipped: true,
-      reason: `pas de relance prévue (j3mRelances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)})`,
+      reason: `pas de relance prévue (j3mRelances=${currentCount}, daysSinceAction=${daysSinceLastAction.toFixed(1)}, retryAfter=${record.j3mRetryAfter})`,
     };
   }
+  record.j3mRetryAfter = null;
 
   // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;
