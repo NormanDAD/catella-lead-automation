@@ -305,7 +305,10 @@ function loadJsonFile(file, fallback) {
 function saveJsonFile(file, data) {
   try {
     ensureDataDir();
-    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    // Écriture atomique : write→tmp puis rename pour éviter la corruption si kill en pleine écriture
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, file);
   } catch (e) {
     console.error(`[persistence] Erreur écriture ${file}:`, e.message);
   }
@@ -5131,3 +5134,33 @@ async function pollWhatsAppReplies() {
 setTimeout(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur démarrage:', e.message)), 5000);
 // Puis toutes les 5 minutes
 setInterval(() => pollWhatsAppReplies().catch(e => console.error('[wa-poll] erreur interval:', e.message)), 5 * 60 * 1000);
+
+// ─── BACKUP QUOTIDIEN processed_leads.json ──────────────────────────────────
+// Copie datée dans /data/processed_leads_backup_YYYY-MM-DD.json, garde 7 jours.
+// Protection contre la perte de données au redémarrage Railway.
+async function backupProcessed() {
+  try {
+    if (!fs.existsSync(PROCESSED_FILE)) return;
+    const date = new Date().toISOString().slice(0, 10);
+    const backupFile = path.join(DATA_DIR, `processed_leads_backup_${date}.json`);
+    if (!fs.existsSync(backupFile)) {
+      fs.copyFileSync(PROCESSED_FILE, backupFile);
+      console.log(`[backup] processed_leads → ${backupFile} (${fs.statSync(backupFile).size} bytes)`);
+    }
+    // Rotation : garder max 7 backups
+    const files = fs.readdirSync(DATA_DIR)
+      .filter(f => /^processed_leads_backup_\d{4}-\d{2}-\d{2}\.json$/.test(f))
+      .sort();
+    while (files.length > 7) {
+      const old = files.shift();
+      fs.unlinkSync(path.join(DATA_DIR, old));
+      console.log(`[backup] supprimé ancien backup: ${old}`);
+    }
+  } catch (e) {
+    console.error('[backup] erreur:', e.message);
+  }
+}
+// Backup immédiat au démarrage (au cas où le serveur redémarre)
+setTimeout(() => backupProcessed().catch(() => {}), 10 * 1000);
+// Puis toutes les 24h
+setInterval(() => backupProcessed().catch(() => {}), 24 * 60 * 60 * 1000);
