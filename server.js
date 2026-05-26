@@ -2279,7 +2279,7 @@ app.post('/api/admin/notify-missed-wa-replies', async (req, res) => {
   for (const rec of replies) {
     try {
       const adUrl = rec.leadId && rec.programId
-        ? `https://app.adlead.immo/catella/leads/${rec.programId}/${rec.leadId}` : null;
+        ? buildAdleadLeadUrl(rec.programId, rec.leadId) : null;
       const when = rec.receivedAt
         ? new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
         : '—';
@@ -3345,7 +3345,7 @@ app.get('/conversations', (req, res) => {
   const cardsHtml = convs.map((c, i) => {
     const name = c.contactName || c.phone || '—';
     const prog = c.programName || '—';
-    const adUrl = c.leadId && c.programId ? `https://app.adlead.immo/catella/leads/${c.programId}/${c.leadId}` : null;
+    const adUrl = c.leadId && c.programId ? buildAdleadLeadUrl(c.programId, c.leadId) : null;
     const windowBadge = c.windowOpen
       ? '<span style="background:#e8f7ee;color:#1d7a3a;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">✓ Fenêtre ouverte — tu peux répondre</span>'
       : '<span style="background:#f0f0f2;color:#6e6e73;padding:2px 10px;border-radius:20px;font-size:12px;">Fenêtre expirée</span>';
@@ -4966,7 +4966,7 @@ async function pollWhatsAppReplies() {
       if (!rec.whatsappBody) continue;
       try {
         const adUrl = rec.leadId && rec.programId
-          ? `https://app.adlead.immo/catella/leads/${rec.programId}/${rec.leadId}`
+          ? buildAdleadLeadUrl(rec.programId, rec.leadId)
           : null;
         const tgText = rec.matched
           ? `📱 <b>RÉPONSE WhatsApp prospect — ACTION ADLEAD URGENTE</b>\n\n` +
