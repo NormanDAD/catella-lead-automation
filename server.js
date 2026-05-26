@@ -302,7 +302,26 @@ function loadJsonFile(file, fallback) {
   }
 }
 
+let _diskAlertSent = false;
+function checkDiskSpace() {
+  try {
+    const stat = fs.statfsSync(DATA_DIR);
+    const freeMb = (stat.bfree * stat.bsize) / (1024 * 1024);
+    if (freeMb < 80 && !_diskAlertSent) {
+      _diskAlertSent = true;
+      const msg = `⚠️ ALERTE ESPACE DISQUE : volume Railway à ${freeMb.toFixed(0)} MB libres — risque ENOSPC imminent. Purger les brochures ou agrandir le volume.`;
+      console.error('[persistence]', msg);
+      if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+        sendTelegramNotification(msg).catch(() => {});
+      }
+    } else if (freeMb >= 80) {
+      _diskAlertSent = false;
+    }
+  } catch (_) {}
+}
+
 function saveJsonFile(file, data) {
+  checkDiskSpace();
   try {
     ensureDataDir();
     // Écriture atomique : write→tmp puis rename pour éviter la corruption si kill en pleine écriture
@@ -311,6 +330,9 @@ function saveJsonFile(file, data) {
     fs.renameSync(tmp, file);
   } catch (e) {
     console.error(`[persistence] Erreur écriture ${file}:`, e.message);
+    if (e.code === 'ENOSPC' && CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+      sendTelegramNotification(`🚨 ENOSPC sur ${path.basename(file)} — volume Railway PLEIN. Données NON sauvegardées.`).catch(() => {});
+    }
   }
 }
 
@@ -438,6 +460,19 @@ function saveProcessed() { saveJsonFile(PROCESSED_FILE, processedLeads); }
 
 // ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
+
+// Middleware admin : tous les endpoints /api/admin/* et /api/test/* et /api/scheduler/* requièrent ADMIN_UPLOAD_TOKEN
+function requireAdmin(req, res, next) {
+  const token = req.headers['x-admin-token'] || req.query._token || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN) return res.status(503).json({ error: 'ADMIN_UPLOAD_TOKEN non configuré' });
+  if (token !== CONFIG.ADMIN_UPLOAD_TOKEN) return res.status(401).json({ error: 'Token admin requis' });
+  next();
+}
+app.use('/api/admin', requireAdmin);
+app.use('/api/test', requireAdmin);
+app.use('/api/scheduler', requireAdmin);
+app.use('/api/reply-handler', requireAdmin);
+
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
   lastModified: false,
@@ -3555,6 +3590,17 @@ app.post('/api/whatsapp/reply', async (req, res) => {
   if (!to || !body) return res.status(400).json({ error: 'to et body requis' });
   if (!CONFIG.TWILIO_ACCOUNT_SID) return res.status(503).json({ error: 'Twilio non configuré' });
 
+  // Vérification fenêtre 24h Meta côté serveur
+  const normTo = String(to).replace(/[^\d+]/g, '');
+  const lastInbound = processedLeads
+    .filter(l => l.status === 'whatsapp_reply_received' && l.whatsappFrom && String(l.whatsappFrom).replace(/[^\d+]/g, '') === normTo)
+    .map(l => l.receivedAt || l.processedAt)
+    .sort()
+    .pop();
+  if (lastInbound && (Date.now() - new Date(lastInbound).getTime()) > 24 * 60 * 60 * 1000) {
+    return res.status(403).json({ ok: false, error: 'Fenêtre 24h Meta expirée — seuls les templates sont autorisés' });
+  }
+
   try {
     const resp = await sendWhatsAppViaTwilio(to, body);
     const record = {
@@ -3592,13 +3638,17 @@ app.post('/webhook/adlead', (req, res) => {
     return res.status(200).json({ message: 'Événement ignoré' });
   }
 
-  res.status(200).json({ message: 'Reçu, en attente de traitement' });
-
   try {
     enqueueLead(req.body);
   } catch (err) {
     console.error('[webhook] Erreur enqueue:', err.message);
+    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+      sendTelegramNotification(`🚨 [webhook/adlead] Erreur enqueue lead — lead PERDU : ${err.message}`).catch(() => {});
+    }
+    // On retourne quand même 200 pour éviter la rélivraison Adlead (qui relivrerait en boucle)
+    // mais on alerte via Telegram pour intervention manuelle.
   }
+  res.status(200).json({ message: 'Reçu, en attente de traitement' });
 });
 
 // ─── REPLY WATCHER — WEBHOOK POWER AUTOMATE ────────────────────────────────
@@ -3636,7 +3686,10 @@ app.post('/webhook/inbox-reply', async (req, res) => {
     return res.status(503).json({ error: 'POWER_AUTOMATE_INBOX_SECRET non configuré côté serveur' });
   }
   const provided = req.headers['x-pa-secret'] || req.query.secret || '';
-  if (provided !== expected) {
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.alloc(expectedBuf.length);
+  Buffer.from(provided).copy(providedBuf);
+  if (!require('crypto').timingSafeEqual(expectedBuf, providedBuf)) {
     console.warn('[webhook/inbox-reply] secret invalide');
     return res.status(401).json({ error: 'Secret invalide' });
   }
@@ -3936,20 +3989,25 @@ app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), 
       }
 
       // Si le match existe mais a programName/contactName nuls (ex: record reconstruit post-ENOSPC),
-      // essayer d'extraire depuis les corps de tous les messages connus pour ce numéro.
+      // extraire depuis les corps des messages connus pour ce numéro et persister dans processedLeads.
       if (match && (!match.programName || !match.contactName)) {
         const allSamePhone = processedLeads.filter(l => {
           const p = l.whatsappTo || l.whatsappFrom;
           return p && normalizeForMatch(p) === fromNorm;
         });
         const msgs = allSamePhone.map(l => ({ body: l.whatsappBody || '' }));
-        if (!match.contactName) {
-          const n = extractNameFromBodies(msgs) || profileName;
-          if (n) match = { ...match, contactName: n };
-        }
-        if (!match.programName) {
-          const p = extractProgramFromBodies(msgs);
-          if (p) match = { ...match, programName: p };
+        const enrichedName = !match.contactName ? (extractNameFromBodies(msgs) || profileName || null) : null;
+        const enrichedProg = !match.programName ? extractProgramFromBodies(msgs) : null;
+        if (enrichedName || enrichedProg) {
+          match = { ...match,
+            contactName: enrichedName || match.contactName,
+            programName: enrichedProg || match.programName,
+          };
+          // Persister l'enrichissement sur tous les records du même numéro
+          for (const l of allSamePhone) {
+            if (!l.contactName && enrichedName) l.contactName = enrichedName;
+            if (!l.programName && enrichedProg)  l.programName = enrichedProg;
+          }
         }
       }
 
@@ -4050,7 +4108,11 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
         }
       }
 
-      // 7. Trace dans processedLeads pour audit dashboard
+      // 7. Trace dans processedLeads pour audit dashboard (idempotent par msgSid)
+      if (msgSid && processedLeads.some(l => l.whatsappMessageSid === msgSid)) {
+        console.log(`[webhook/whatsapp-incoming] msgSid ${msgSid} déjà présent — retry Twilio ignoré`);
+        return;
+      }
       processedLeads.push({
         id: `wa-reply-${msgSid || Date.now()}`,
         status: 'whatsapp_reply_received',
@@ -4109,11 +4171,13 @@ function isJ15Candidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j15Relances || 0;
-  // Fenêtre strictement journalière — évite de scanner des dizaines de leads.
-  // Le cron tourne à 10h00 Paris : window [n+15, n+16[ garantit au max 1 run par lead.
-  if (n === 0 && ageDays >= 15 && ageDays < 16) return true; // J+15
-  if (n === 1 && ageDays >= 16 && ageDays < 17) return true; // J+16
-  if (n === 2 && ageDays >= 17 && ageDays < 18) return true; // J+17
+  // Fenêtre ouverte à droite jusqu'à 30 jours pour éviter qu'un lead skippé
+  // (last_interaction_at récent) soit définitivement raté si la fenêtre [n+15,n+16[
+  // passe avant que last_interaction_at atteigne 15j. La protection anti-doublon
+  // vient de lastJ15RunYmd (1 exécution max par jour), pas de la fenêtre haute.
+  if (n === 0 && ageDays >= 15 && ageDays < 30) return true; // J+15+
+  if (n === 1 && ageDays >= 16 && ageDays < 30) return true; // J+16+
+  if (n === 2 && ageDays >= 17 && ageDays < 30) return true; // J+17+
   return false;
 }
 
@@ -4164,6 +4228,7 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   const lead = await fetchLead(record.leadId, { programId: record.programId });
   if (!lead) return { skipped: true, reason: 'lead introuvable côté Adlead' };
   if (lead.is_under_prescription === true) return { skipped: true, reason: 'is_under_prescription=true' };
+  if (lead.discard_reason != null) return { skipped: true, reason: `discard_reason="${lead.discard_reason}"` };
 
   // Status check — règle Option A : si status ≠ pending, reset counter et skip.
   if (lead.status !== 'pending') {
@@ -4446,6 +4511,7 @@ function getParisYmdAndHour() {
   return { ymd: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
 }
 async function j15Cron() {
+  if (CONFIG.PIPELINE_DISABLED) return;
   const { ymd, hour } = getParisYmdAndHour();
   if (hour !== CONFIG.J15_CRON_HOUR_PARIS) return;
   if (lastJ15RunYmd === ymd) return;
@@ -4488,12 +4554,11 @@ function isJ3MCandidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j3mRelances || 0;
-  // Fenêtre strictement journalière — 1 seule fenêtre de 24h par jour de cycle.
-  // Évite de scanner 200+ leads par run ; seuls les leads "du jour" sont examinés.
-  // Le cron tourne à 9h15 Paris : window [n+3, n+4[ garantit au max 1 run par lead.
-  if (n === 0 && ageDays >= 3   && ageDays < 4)  return true; // J+3
-  if (n === 1 && ageDays >= 4   && ageDays < 5)  return true; // J+4
-  if (n === 2 && ageDays >= 5   && ageDays < 6)  return true; // J+5
+  // Fenêtre ouverte à droite (même raison que isJ15Candidate) : évite qu'un lead
+  // skippé un jour soit définitivement raté si last_interaction_at change la donne.
+  if (n === 0 && ageDays >= 3  && ageDays < 15) return true; // J+3+
+  if (n === 1 && ageDays >= 4  && ageDays < 15) return true; // J+4+
+  if (n === 2 && ageDays >= 5  && ageDays < 15) return true; // J+5+
   return false;
 }
 
@@ -4549,6 +4614,9 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   // Safety : dénonciation bloque toujours (consistant avec J+1 et J+15).
   if (lead.is_under_prescription === true) {
     return { skipped: true, reason: 'is_under_prescription=true' };
+  }
+  if (lead.discard_reason != null) {
+    return { skipped: true, reason: `discard_reason="${lead.discard_reason}"` };
   }
 
   // Status check — règle Option A : si status ≠ pending, on reset le counter
@@ -4776,6 +4844,7 @@ async function j3mTick({ dryRun = false } = {}) {
 let lastJ3MRunYmd = null;
 let lastJ3MRunReport = null; // rapport de la dernière exéc réelle (pas dry-run)
 async function j3mCron() {
+  if (CONFIG.PIPELINE_DISABLED) return;
   const { ymd, hour, minute } = getParisYmdHourMinute();
   if (hour !== CONFIG.J3M_CRON_HOUR_PARIS) return;
   if (minute < CONFIG.J3M_CRON_MIN_MINUTE) return;
@@ -5005,7 +5074,7 @@ function loadWaPollMeta() {
   try { return JSON.parse(fs.readFileSync(WA_POLL_META_FILE, 'utf8')); } catch { return {}; }
 }
 function saveWaPollMeta(meta) {
-  try { fs.writeFileSync(WA_POLL_META_FILE, JSON.stringify(meta, null, 2)); } catch {}
+  saveJsonFile(WA_POLL_META_FILE, meta);
 }
 
 async function pollWhatsAppReplies() {
