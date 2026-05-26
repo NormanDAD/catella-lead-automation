@@ -458,6 +458,21 @@ app.get('/brochures/:filename', (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
+// DELETE /api/admin/brochures — vide BROCHURES_DIR pour libérer de l'espace
+app.delete('/api/admin/brochures', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const files = fs.existsSync(BROCHURES_DIR) ? fs.readdirSync(BROCHURES_DIR) : [];
+    for (const f of files) fs.unlinkSync(path.join(BROCHURES_DIR, f));
+    res.json({ ok: true, deleted: files.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/admin/upload-brochure?filename=slug.pdf
 // Corps : application/octet-stream (le PDF brut). Auth : x-admin-token.
 app.post('/api/admin/upload-brochure', (req, res) => {
