@@ -3260,6 +3260,17 @@ app.get('/api/whatsapp/conversations', (req, res) => {
     }
   }
 
+  // Index inboxWatcher par (prénom_norm, programme_norm) → { leadId, programId, contactName }
+  const _relances = inboxWatcher.getRecentRelances(500);
+  const _relanceIdx = {};
+  for (const r of _relances) {
+    if (!r.leadId || !r.programId) continue;
+    const firstName = (r.contactName || '').split(/\s+/)[0].normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
+    const prog      = (r.programName || '').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+    const key = `${firstName}||${prog}`;
+    if (!_relanceIdx[key]) _relanceIdx[key] = r;
+  }
+
   // Extrait prénom et programme depuis les corps de messages quand les métadonnées manquent
   function extractNameFromBodies(messages) {
     for (const m of messages) {
@@ -3285,6 +3296,17 @@ app.get('/api/whatsapp/conversations', (req, res) => {
       // Enrichissement on-the-fly si métadonnées manquantes (ex: après rebuild depuis Twilio)
       if (!c.contactName) c.contactName = extractNameFromBodies(c.messages);
       if (!c.programName) c.programName = extractProgramFromBodies(c.messages);
+      // Si leadId/programId manquants, chercher dans inboxWatcher par prénom+programme
+      if ((!c.leadId || !c.programId) && c.contactName && c.programName) {
+        const fn   = c.contactName.normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
+        const prog = c.programName.normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+        const hit  = _relanceIdx[`${fn}||${prog}`];
+        if (hit) {
+          if (!c.leadId)    c.leadId    = hit.leadId;
+          if (!c.programId) c.programId = hit.programId;
+          if (!c.contactName || c.contactName === fn) c.contactName = hit.contactName;
+        }
+      }
       // Fenêtre libre Meta : 24h après le dernier message entrant
       const windowExpiresAt = c.lastInboundAt
         ? new Date(new Date(c.lastInboundAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
