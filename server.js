@@ -458,6 +458,19 @@ app.get('/brochures/:filename', (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
+// GET /api/admin/raw-file?f=processed_leads.json — lit un fichier data brut (récupération urgence)
+app.get('/api/admin/raw-file', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) return res.status(401).end();
+  const allowed = ['processed_leads.json', 'pending_leads.json'];
+  const name = req.query.f || '';
+  if (!allowed.includes(name)) return res.status(400).end();
+  const filePath = path.join(DATA_DIR, name);
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  res.setHeader('Content-Type', 'application/octet-stream');
+  fs.createReadStream(filePath).pipe(res);
+});
+
 // DELETE /api/admin/brochures — vide BROCHURES_DIR pour libérer de l'espace
 app.delete('/api/admin/brochures', (req, res) => {
   const token = req.headers['x-admin-token'] || '';
