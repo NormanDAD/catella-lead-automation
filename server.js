@@ -3260,10 +3260,31 @@ app.get('/api/whatsapp/conversations', (req, res) => {
     }
   }
 
+  // Extrait prénom et programme depuis les corps de messages quand les métadonnées manquent
+  function extractNameFromBodies(messages) {
+    for (const m of messages) {
+      const body = m.body || '';
+      const m1 = body.match(/Bonjour\s+([A-ZÀ-Ÿa-zà-ÿ][a-zà-ÿ\-]+)[,\n]/);
+      if (m1) return m1[1].charAt(0).toUpperCase() + m1[1].slice(1);
+    }
+    return null;
+  }
+  function extractProgramFromBodies(messages) {
+    for (const m of messages) {
+      const body = m.body || '';
+      const m1 = body.match(/programme\s+([A-ZÀÉÈÊËÎÏÔÙÛÜ0-9][^\n,.]{2,40})/i);
+      if (m1) return m1[1].trim().replace(/\.$/, '');
+    }
+    return null;
+  }
+
   const conversations = Object.values(convMap)
     .filter(c => c.messages.some(m => m.direction === 'in'))
     .map(c => {
       c.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
+      // Enrichissement on-the-fly si métadonnées manquantes (ex: après rebuild depuis Twilio)
+      if (!c.contactName) c.contactName = extractNameFromBodies(c.messages);
+      if (!c.programName) c.programName = extractProgramFromBodies(c.messages);
       // Fenêtre libre Meta : 24h après le dernier message entrant
       const windowExpiresAt = c.lastInboundAt
         ? new Date(new Date(c.lastInboundAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
@@ -3301,6 +3322,18 @@ app.get('/conversations', (req, res) => {
     .filter(c => c.messages.some(m => m.direction === 'in'))
     .map(c => {
       c.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
+      if (!c.contactName) {
+        for (const m of c.messages) {
+          const hit = (m.body || '').match(/Bonjour\s+([A-ZÀ-Ÿa-zà-ÿ][a-zà-ÿ\-]+)[,\n]/);
+          if (hit) { c.contactName = hit[1].charAt(0).toUpperCase() + hit[1].slice(1); break; }
+        }
+      }
+      if (!c.programName) {
+        for (const m of c.messages) {
+          const hit = (m.body || '').match(/programme\s+([A-ZÀÉÈÊËÎÏÔÙÛÜ0-9][^\n,.]{2,40})/i);
+          if (hit) { c.programName = hit[1].trim().replace(/\.$/, ''); break; }
+        }
+      }
       const exp = c.lastInboundAt ? new Date(new Date(c.lastInboundAt).getTime() + 86400000).toISOString() : null;
       return { ...c, windowOpen: exp ? new Date() < new Date(exp) : false, windowExpiresAt: exp };
     })
