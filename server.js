@@ -1040,6 +1040,22 @@ Web: <a href="https://www.catellaresidential.fr">www.catellaresidential.fr</a> |
 </div>`;
 }
 
+function extractNameFromBodies(messages) {
+  for (const m of messages) {
+    const hit = (m.body || '').match(/Bonjour\s+([A-ZÀ-Ÿa-zà-ÿ][a-zà-ÿ\-]+)[,\n]/);
+    if (hit) return hit[1].charAt(0).toUpperCase() + hit[1].slice(1);
+  }
+  return null;
+}
+
+function extractProgramFromBodies(messages) {
+  for (const m of messages) {
+    const m1 = (m.body || '').match(/programme\s+([A-ZÀÉÈÊËÎÏÔÙÛÜ0-9][^\n,.]{2,40})/i);
+    if (m1) return m1[1].trim().replace(/\.$/, '');
+  }
+  return null;
+}
+
 function escapeHtml(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
@@ -2903,6 +2919,46 @@ app.post('/api/admin/rebuild-wa-conversations', async (req, res) => {
   res.json({ total: allMessages.length, inserted, skipped, phones: Object.keys(byPhone).length });
 });
 
+// POST /api/admin/enrich-wa-records
+// Backfille programName / contactName manquants sur les records WA en scannant
+// les corps de messages (templates résolus stockés par Twilio).
+app.post('/api/admin/enrich-wa-records', (req, res) => {
+  const normPhone = s => String(s || '').replace(/[^\d+]/g, '');
+
+  // Grouper par numéro de téléphone
+  const byPhone = {};
+  for (const l of processedLeads) {
+    const phone = normPhone(l.whatsappTo || l.whatsappFrom);
+    if (!phone) continue;
+    if (!byPhone[phone]) byPhone[phone] = [];
+    byPhone[phone].push(l);
+  }
+
+  let updatedRecords = 0;
+  for (const records of Object.values(byPhone)) {
+    // Cherche si un record a déjà un vrai programName
+    const existing = records.find(r => r.programName && !BAD_PROGRAM_NAME.test(r.programName));
+    const existingName = records.find(r => r.contactName);
+    if (existing && existingName) continue; // tout est déjà enrichi
+
+    const msgs = records.map(r => ({ body: r.whatsappBody || '' }));
+    const name = existingName ? existingName.contactName : extractNameFromBodies(msgs);
+    const prog = existing ? existing.programName : extractProgramFromBodies(msgs);
+    if (!name && !prog) continue;
+
+    for (const r of records) {
+      let changed = false;
+      if (!r.contactName && name) { r.contactName = name; changed = true; }
+      if ((!r.programName || BAD_PROGRAM_NAME.test(r.programName)) && prog) { r.programName = prog; changed = true; }
+      if (changed) updatedRecords++;
+    }
+  }
+
+  if (updatedRecords > 0) saveProcessed();
+  console.log(`[enrich-wa-records] ${updatedRecords} records mis à jour`);
+  res.json({ ok: true, updated: updatedRecords });
+});
+
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
 app.get('/api/test/lead-dump', async (req, res) => {
@@ -3269,24 +3325,6 @@ app.get('/api/whatsapp/conversations', (req, res) => {
     const prog      = (r.programName || '').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
     const key = `${firstName}||${prog}`;
     if (!_relanceIdx[key]) _relanceIdx[key] = r;
-  }
-
-  // Extrait prénom et programme depuis les corps de messages quand les métadonnées manquent
-  function extractNameFromBodies(messages) {
-    for (const m of messages) {
-      const body = m.body || '';
-      const m1 = body.match(/Bonjour\s+([A-ZÀ-Ÿa-zà-ÿ][a-zà-ÿ\-]+)[,\n]/);
-      if (m1) return m1[1].charAt(0).toUpperCase() + m1[1].slice(1);
-    }
-    return null;
-  }
-  function extractProgramFromBodies(messages) {
-    for (const m of messages) {
-      const body = m.body || '';
-      const m1 = body.match(/programme\s+([A-ZÀÉÈÊËÎÏÔÙÛÜ0-9][^\n,.]{2,40})/i);
-      if (m1) return m1[1].trim().replace(/\.$/, '');
-    }
-    return null;
   }
 
   const conversations = Object.values(convMap)
@@ -3891,6 +3929,24 @@ app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), 
         if (normalizeForMatch(l.whatsappTo) === fromNorm) {
           match = l;
           break;
+        }
+      }
+
+      // Si le match existe mais a programName/contactName nuls (ex: record reconstruit post-ENOSPC),
+      // essayer d'extraire depuis les corps de tous les messages connus pour ce numéro.
+      if (match && (!match.programName || !match.contactName)) {
+        const allSamePhone = processedLeads.filter(l => {
+          const p = l.whatsappTo || l.whatsappFrom;
+          return p && normalizeForMatch(p) === fromNorm;
+        });
+        const msgs = allSamePhone.map(l => ({ body: l.whatsappBody || '' }));
+        if (!match.contactName) {
+          const n = extractNameFromBodies(msgs) || profileName;
+          if (n) match = { ...match, contactName: n };
+        }
+        if (!match.programName) {
+          const p = extractProgramFromBodies(msgs);
+          if (p) match = { ...match, programName: p };
         }
       }
 
