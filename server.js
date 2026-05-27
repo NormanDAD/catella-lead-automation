@@ -4529,7 +4529,7 @@ function getParisYmdAndHour() {
 async function j15Cron() {
   if (CONFIG.PIPELINE_DISABLED) return;
   const { ymd, hour } = getParisYmdAndHour();
-  if (hour !== CONFIG.J15_CRON_HOUR_PARIS) return;
+  if (hour < CONFIG.J15_CRON_HOUR_PARIS) return; // trop tôt
   if (lastJ15RunYmd === ymd) return;
   lastJ15RunYmd = ymd;
   try { await j15Tick(); }
@@ -4871,8 +4871,8 @@ let lastJ3MRunReport = null; // rapport de la dernière exéc réelle (pas dry-r
 async function j3mCron() {
   if (CONFIG.PIPELINE_DISABLED) return;
   const { ymd, hour, minute } = getParisYmdHourMinute();
-  if (hour !== CONFIG.J3M_CRON_HOUR_PARIS) return;
-  if (minute < CONFIG.J3M_CRON_MIN_MINUTE) return;
+  if (hour < CONFIG.J3M_CRON_HOUR_PARIS) return; // trop tôt
+  if (hour === CONFIG.J3M_CRON_HOUR_PARIS && minute < CONFIG.J3M_CRON_MIN_MINUTE) return;
   if (lastJ3MRunYmd === ymd) return;
   lastJ3MRunYmd = ymd;
   try { await j3mTick(); }
