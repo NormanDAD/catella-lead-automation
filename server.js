@@ -2222,12 +2222,17 @@ app.get('/api/stats', (req, res) => {
   };
 
   // Leads sans suite commerciale visible : envoyés il y a > 3 jours, pas de réponse WA
+  // On exclut les leadId null (records reconstruits post-ENOSPC) des deux côtés
+  // pour éviter que null ∈ repliedLeadIds fasse passer tous les rebuilt comme "répondu".
   const THREE_DAYS = 3 * DAY;
   const repliedLeadIds = new Set(
-    processedLeads.filter(l => l.status === 'whatsapp_reply_received').map(l => l.leadId)
+    processedLeads
+      .filter(l => l.status === 'whatsapp_reply_received' && l.leadId != null)
+      .map(l => l.leadId)
   );
   const noFollowUpCount = processedLeads.filter(l =>
     l.status === 'sent' &&
+    l.leadId != null &&
     (now - new Date(l.processedAt || 0).getTime()) > THREE_DAYS &&
     !repliedLeadIds.has(l.leadId)
   ).length;
