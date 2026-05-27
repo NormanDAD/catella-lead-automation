@@ -5088,6 +5088,140 @@ async function dailyHealthCheckCron() {
 }
 setInterval(dailyHealthCheckCron, 5 * 60 * 1000);
 
+// ─── DIGEST TOUTES LES 3H ────────────────────────────────────────────────────
+// Envoie un email récapitulatif à Norman à 9h, 12h, 15h et 18h Paris.
+// Résumé des 3 dernières heures : J+1 envoyés, annulés, réponses WA, J+3/J+15.
+
+let digestLastRunKey = null; // "YYYY-MM-DD-HH" pour éviter les doublons
+
+async function sendActivityDigest(windowHours = 3) {
+  const now = Date.now();
+  const windowMs = windowHours * 60 * 60 * 1000;
+  const since = now - windowMs;
+
+  const recent = processedLeads.filter(l => new Date(l.processedAt || l.receivedAt || 0).getTime() >= since);
+
+  const sent      = recent.filter(l => l.status === 'sent');
+  const cancelled = recent.filter(l => l.status === 'cancelled');
+  const errors    = recent.filter(l => l.status === 'error');
+  const waReplies = recent.filter(l => l.status === 'whatsapp_reply_received');
+  const waSent    = recent.filter(l => l.status === 'whatsapp_reply_sent');
+
+  const pending = pendingLeads.length;
+
+  const timeStr = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
+  const subject = `[Catella Pipeline] Bilan ${timeStr} — ${sent.length} envoyé${sent.length !== 1 ? 's' : ''} · ${waReplies.length} réponse${waReplies.length !== 1 ? 's' : ''} WA`;
+
+  const fmtDate = iso => new Date(iso).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
+
+  const rowStyle = 'padding:6px 10px;border-bottom:1px solid #f0f0f0;';
+  const thStyle  = 'padding:6px 10px;background:#f5f5f7;font-weight:600;text-align:left;font-size:12px;color:#555;';
+
+  const sentRows = sent.length ? sent.map(l => `
+    <tr>
+      <td style="${rowStyle}">${fmtDate(l.processedAt)}</td>
+      <td style="${rowStyle}">${escapeHtml(l.programName || '—')}</td>
+      <td style="${rowStyle}">${(l.email || '').replace(/(.{2}).*(@.*)/, '$1***$2') || '—'}</td>
+      <td style="${rowStyle}">${l.whatsappSid ? '✅ WA' : '—'}</td>
+    </tr>`).join('') : `<tr><td colspan="4" style="${rowStyle}color:#aaa;">Aucun envoi</td></tr>`;
+
+  const cancelRows = cancelled.length ? cancelled.slice(0, 10).map(l => `
+    <tr>
+      <td style="${rowStyle}">${fmtDate(l.processedAt)}</td>
+      <td style="${rowStyle}">${escapeHtml(l.programName || `#${l.programId}` || '—')}</td>
+      <td style="${rowStyle}color:#888;font-size:12px;">${escapeHtml((l.reason || '').slice(0, 80))}</td>
+    </tr>`).join('') + (cancelled.length > 10 ? `<tr><td colspan="3" style="${rowStyle}color:#aaa;">… et ${cancelled.length - 10} autres</td></tr>` : '')
+    : `<tr><td colspan="3" style="${rowStyle}color:#aaa;">Aucun</td></tr>`;
+
+  const waRows = waReplies.length ? waReplies.map(l => `
+    <tr>
+      <td style="${rowStyle}">${fmtDate(l.receivedAt || l.processedAt)}</td>
+      <td style="${rowStyle}font-weight:600;">${escapeHtml(l.contactName || l.whatsappProfileName || l.whatsappFrom || '—')}</td>
+      <td style="${rowStyle}">${escapeHtml(l.programName || '—')}</td>
+      <td style="${rowStyle}font-size:12px;color:#444;">${escapeHtml((l.whatsappBody || '').slice(0, 80))}${(l.whatsappBody || '').length > 80 ? '…' : ''}</td>
+    </tr>`).join('')
+    : `<tr><td colspan="4" style="${rowStyle}color:#aaa;">Aucune réponse</td></tr>`;
+
+  const j3mInfo  = lastJ3MRunReport  ? `J+3 : ${lastJ3MRunReport.sent || 0} envoyé(s), ${lastJ3MRunReport.skipped || 0} skippé(s) — run du ${lastJ3MRunReport.ymd}` : 'J+3 : pas de run récent';
+  const j15Info  = lastJ15RunReport  ? `J+15 : ${lastJ15RunReport.sent || 0} envoyé(s), ${lastJ15RunReport.skipped || 0} skippé(s) — run du ${lastJ15RunReport.ymd}` : 'J+15 : pas de run récent';
+
+  const kpiBar = (label, val, color) =>
+    `<td style="padding:12px 20px;text-align:center;"><div style="font-size:28px;font-weight:700;color:${color};">${val}</div><div style="font-size:11px;color:#888;margin-top:2px;">${label}</div></td>`;
+
+  const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1d1d1f;background:#f5f5f7;margin:0;padding:20px;">
+<div style="max-width:640px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.08);">
+
+  <div style="background:#1a3a5c;padding:20px 24px;">
+    <div style="color:white;font-size:18px;font-weight:700;">📊 Bilan pipeline — ${timeStr} Paris</div>
+    <div style="color:rgba(255,255,255,.7);font-size:13px;margin-top:4px;">Activité des ${windowHours} dernières heures · ${new Date().toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' })}</div>
+  </div>
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="border-bottom:1px solid #f0f0f0;">
+    <tr>
+      ${kpiBar('Envoyés J+1', sent.length, sent.length > 0 ? '#25c281' : '#1d1d1f')}
+      ${kpiBar('Annulés', cancelled.length, '#888')}
+      ${kpiBar('Réponses WA', waReplies.length, waReplies.length > 0 ? '#f59e0b' : '#1d1d1f')}
+      ${kpiBar('Erreurs', errors.length, errors.length > 0 ? '#ef4444' : '#1d1d1f')}
+      ${kpiBar('En attente', pending, pending > 5 ? '#f59e0b' : '#1d1d1f')}
+    </tr>
+  </table>
+
+  <div style="padding:20px 24px;">
+
+    <h3 style="margin:0 0 10px;font-size:14px;color:#1a3a5c;">📤 Relances J+1 envoyées (${sent.length})</h3>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #f0f0f0;border-radius:8px;overflow:hidden;margin-bottom:20px;">
+      <tr><th style="${thStyle}">Heure</th><th style="${thStyle}">Programme</th><th style="${thStyle}">Email</th><th style="${thStyle}">WA</th></tr>
+      ${sentRows}
+    </table>
+
+    <h3 style="margin:0 0 10px;font-size:14px;color:#1a3a5c;">💬 Réponses WhatsApp reçues (${waReplies.length})</h3>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #f0f0f0;border-radius:8px;overflow:hidden;margin-bottom:20px;">
+      <tr><th style="${thStyle}">Heure</th><th style="${thStyle}">Prospect</th><th style="${thStyle}">Programme</th><th style="${thStyle}">Message</th></tr>
+      ${waRows}
+    </table>
+
+    <h3 style="margin:0 0 10px;font-size:14px;color:#1a3a5c;">🚫 Leads annulés (${cancelled.length})</h3>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #f0f0f0;border-radius:8px;overflow:hidden;margin-bottom:20px;">
+      <tr><th style="${thStyle}">Heure</th><th style="${thStyle}">Programme</th><th style="${thStyle}">Raison</th></tr>
+      ${cancelRows}
+    </table>
+
+    <div style="background:#f5f5f7;border-radius:8px;padding:12px 16px;font-size:13px;color:#555;">
+      <strong>Relances automatiques :</strong><br/>
+      ${j3mInfo}<br/>
+      ${j15Info}
+    </div>
+
+  </div>
+
+  <div style="padding:12px 24px;background:#f5f5f7;font-size:11px;color:#aaa;text-align:center;">
+    Pipeline Catella Lead Automation · <a href="https://lead-automation-production-33e8.up.railway.app/" style="color:#0070f3;">Dashboard</a>
+  </div>
+</div>
+</body></html>`;
+
+  await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, subject, html);
+  console.log(`[digest] ✅ bilan ${timeStr} envoyé (${sent.length} envoyés, ${waReplies.length} réponses WA, ${cancelled.length} annulés)`);
+}
+
+const DIGEST_HOURS = new Set([9, 12, 15, 18]);
+async function digestCron() {
+  if (CONFIG.PIPELINE_DISABLED) return;
+  if (!CONFIG.POWER_AUTOMATE_URL) return;
+  const { ymd, hour } = getParisYmdAndHour();
+  if (!DIGEST_HOURS.has(hour)) return;
+  const runKey = `${ymd}-${hour}`;
+  if (digestLastRunKey === runKey) return;
+  digestLastRunKey = runKey;
+  try {
+    await sendActivityDigest(3);
+  } catch (e) {
+    console.error('[digest] erreur envoi:', e.message);
+  }
+}
+setInterval(digestCron, 5 * 60 * 1000);
+
 // ─── AUTO-POLLING RÉPONSES WHATSAPP ─────────────────────────────────────────
 // Fallback critique : si le webhook Twilio n'est pas configuré (ou tombe),
 // ce polling récupère quand même toutes les réponses prospects toutes les heures.
