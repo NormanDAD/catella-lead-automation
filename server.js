@@ -1083,11 +1083,22 @@ function buildEmailSubject(ctx) {
   return `Votre projet à ${ctx.ville} — quelques précisions sur « ${ctx.programme} »`;
 }
 
+function stripAccrochePrefix(accroche, ville, promoteur) {
+  if (!accroche) return '';
+  let s = accroche.trim();
+  // Retire "À [ville], " en début de phrase (ville déjà mentionnée dans l'email)
+  s = s.replace(/^À\s+[^,]+,\s*/, '');
+  // Retire " par [promoteur]" (promoteur déjà mentionné)
+  if (promoteur) {
+    const re = new RegExp('\\s+par\\s+' + promoteur.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
+    s = s.replace(re, '');
+  }
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function buildEmailBody(ctx) {
-  // Accroche programme intégrée dans la phrase d'ouverture (quand elle existe)
-  const accrochePhrase = ctx.accroche_programme
-    ? ` <em>${escapeHtml(ctx.accroche_programme)}</em>`
-    : '';
+  const accrocheText = stripAccrochePrefix(ctx.accroche_programme, ctx.ville, ctx.promoteur);
+  const accrochePhrase = accrocheText ? ` <em>${escapeHtml(accrocheText)}</em>` : '';
 
   return `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #222;">
 <p>Bonjour ${escapeHtml(ctx.salutation)},</p>
