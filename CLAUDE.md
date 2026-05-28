@@ -32,7 +32,13 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 
 **Toutes les règles s'arrêtent dès que `lead.status ≠ "pending"`** (= prospect a répondu OU commercial a re-statué). Et toutes respectent la fenêtre 9h-20h Paris + blocage dimanche (`SEND_HOUR_START_PARIS` / `SEND_HOUR_END_PARIS`).
 
-## Règle d'envoi J+1 — NE PAS MODIFIER (figée le 2026-05-28)
+## Règles d'envoi — NE PAS MODIFIER (figées le 2026-05-28)
+
+> Ces trois règles ont été définies et validées par Norman. Ne jamais les modifier sans validation explicite de Norman.
+> Principe commun : avant chaque envoi, `fetchLead()` est appelé pour vérifier l'état réel du lead dans Adlead. Si le statut a changé, on n'envoie pas.
+> Fenêtre commune : lundi–samedi, 9h–20h Paris. Dimanche bloqué toute la journée.
+
+### Règle 1 — J+1 — NE PAS MODIFIER (figée le 2026-05-28)
 
 Le pipeline envoie email + WhatsApp si ET SEULEMENT SI toutes ces conditions sont vraies :
 1. `lead.is_under_prescription !== true` (sinon → `denounced`, priorité absolue)
@@ -43,6 +49,24 @@ Le pipeline envoie email + WhatsApp si ET SEULEMENT SI toutes ces conditions son
 
 Résumé : **`to-process` ou `pending` sans action commerciale → on envoie. Tout le reste → on n'envoie pas.**
 Cette règle a été définie et validée par Norman le 2026-05-28 après incident. Ne pas la changer sans validation explicite.
+
+### Règle 2 — J+3 — NE PAS MODIFIER (figée le 2026-05-28)
+
+Déclenchement : cron 9h15 Paris, tous les jours sauf dimanche.
+Condition d'éligibilité : `record.status === 'sent'` (J+1 a été envoyé) ET `lead.status === 'pending'` (toujours en attente de contact dans Adlead).
+Référence de temps : `record.processedAt` uniquement (= date d'envoi J+1). Jamais `last_interaction_at`.
+Séquence : 3 envois sur 3 jours consécutifs depuis J+3 — email doux → WhatsApp → email final.
+Arrêt immédiat si `lead.status !== 'pending'` (prospect a répondu ou commercial a re-statué). Le compteur `j3mRelances` est alors réinitialisé.
+Fenêtre : lundi–samedi 9h–20h Paris. Un lead skippé un dimanche est rattrapé le lundi.
+
+### Règle 3 — J+15 — NE PAS MODIFIER (figée le 2026-05-28)
+
+Déclenchement : cron 10h Paris, tous les jours sauf dimanche.
+Condition d'éligibilité : `record.status === 'sent'` ET `lead.status === 'pending'` depuis ≥ 15 jours après `record.processedAt`.
+Référence de temps : `record.processedAt` (= date d'envoi J+1).
+Séquence : 3 envois sur 3 jours — email "je classe ton dossier" → WhatsApp → email final.
+Arrêt immédiat si `lead.status !== 'pending'`.
+Fenêtre : lundi–samedi 9h–20h Paris. Un lead skippé un dimanche est rattrapé le lundi.
 
 ## Check dénonciation (post-incident 2026-05-06)
 
