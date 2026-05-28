@@ -1034,6 +1034,11 @@
         <div class="kpi-value" id="kpi-denounced">—</div>
         <div class="kpi-delta">ERP / prescripteur</div>
       </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Exclus<span class="info-icon" data-info="Leads de programmes dans EXCLUDED_PROGRAM_IDS — le pipeline est désactivé sur ces programmes.">i</span></div>
+        <div class="kpi-value" id="kpi-excluded">—</div>
+        <div class="kpi-delta">Programmes désactivés</div>
+      </div>
       <div class="kpi-card clickable" onclick="openModal('skipped')">
         <div class="kpi-label">Skipped<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads ignorés volontairement : programme exclu de la liste, agent en pause, ou nom de programme absent du cache.">i</span></div>
         <div class="kpi-value" id="kpi-skipped">—</div>
@@ -1561,6 +1566,7 @@
       el('kpi-sent-sub').textContent = `dont ${d.whatsapp?.sent || 0} avec WhatsApp`;
       el('kpi-cancelled').textContent = fmt.format(d.counts?.cancelled || 0);
       el('kpi-denounced').textContent = fmt.format(d.counts?.denounced || 0);
+      el('kpi-excluded').textContent = fmt.format(d.counts?.excluded || 0);
       el('kpi-skipped').textContent = fmt.format(d.counts?.skipped || 0);
       el('kpi-errors').textContent = fmt.format(d.counts?.error || 0);
       el('kpi-errors-sub').textContent = d.today?.error > 0 ? `⚠️ ${d.today.error} aujourd'hui` : 'Incidents techniques';

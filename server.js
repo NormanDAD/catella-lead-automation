@@ -1456,18 +1456,42 @@ async function processPendingLead(entry) {
       }
     }
 
-    // Détection "commercial a pris la main"
-    //   - Soit le status de l'interest n'est plus "to-process" (si on a pu le relire)
-    //   - Soit le lead a eu une interaction postérieure à receivedAt (fallback quand rawPayload est figé)
-    //   entry.force === true bypass ce check (utilisé par /api/test/process-now).
+    // ── CHECK DÉNONCIATION — priorité absolue avant tout autre check ──────────
+    // is_under_prescription=true = prescripteur revendique le lead → denounced.
+    // S'applique même si entry.force=true : règle métier non contournable.
+    if (lead.is_under_prescription === true) {
+      console.log(`[process] lead ${entry.leadId} sous prescription → denounced`);
+      return finalize({
+        id: entry.interestId,
+        status: 'denounced',
+        reason: 'Lead sous prescription (is_under_prescription=true)',
+        contactName: lead.contacts?.[0]?.fullname || '',
+        email: lead.contacts?.[0]?.email_primary || '',
+        programId: entry.programId,
+        programName: interest.program?.name || '',
+        leadStatus: lead.status || null,
+        isUnderPrescription: true,
+      });
+    }
+
+    // ── DÉTECTION "commercial a pris la main" ────────────────────────────────
+    // Règle : "pending" (affecté mais non traité) n'est PAS bloquant. Seuls
+    // les statuts indiquant un traitement actif bloquent l'envoi J+1.
+    // Pour last_interaction_at, on ne bloque que si le lead est déjà en statut
+    // actif (sinon, une simple affectation → pending ferait sonner l'alarme).
+    // entry.force bypass ce check (utilisé par /api/test/process-now).
+    const COMMERCIAL_ACTED_STATUSES = new Set([
+      'ongoing', 'to-follow', 'interested', 'negotiating',
+      'discarded', 'pending-purchaser', 'purchaser',
+    ]);
     let commercialActed = false;
     let reason = '';
     if (entry.force) {
       console.log(`[process] entry.force=true → on bypass le check commercialActed`);
-    } else if (interestSource !== 'rawPayload (webhook T0)' && interest.status && interest.status !== 'to-process') {
+    } else if (interestSource !== 'rawPayload (webhook T0)' && interest.status && COMMERCIAL_ACTED_STATUSES.has(interest.status)) {
       commercialActed = true;
       reason = `Statut interest = "${interest.status}"`;
-    } else if (lead.last_interaction_at && entry.receivedAt) {
+    } else if (lead.last_interaction_at && entry.receivedAt && COMMERCIAL_ACTED_STATUSES.has(lead.status)) {
       const li = new Date(lead.last_interaction_at).getTime();
       const rc = new Date(entry.receivedAt).getTime();
       if (li > rc + 60_000) { // marge 1 min pour ignorer l'événement de création
@@ -1488,37 +1512,21 @@ async function processPendingLead(entry) {
       });
     }
 
-    // ── CHECK ROBUSTE DÉNONCIATION/STATUT — fail-closed côté lead ────────────
-    // S'applique TOUJOURS (même si entry.force=true) car c'est une règle métier
-    // critique : on ne doit JAMAIS envoyer une relance auto sur un lead :
-    //   (1) marqué is_under_prescription=true → revendiqué par un prescripteur
-    //       (= dénonciation activée côté Adlead, indépendamment de /registrations)
-    //   (2) avec un status ≠ "to-process" → un commercial l'a déjà fait avancer
-    //       (statuts Adlead : pending, to-follow, ongoing, interested, negotiating,
-    //        discarded, pending-purchaser, purchaser → tous bloquants)
-    //   (3) avec un discard_reason non null → mis hors-jeu pour une raison quelconque
-    //
-    // Ce check repose UNIQUEMENT sur les champs renvoyés par GET /leads/{id}
-    // (que la clé API actuelle peut consulter, on l'a vérifié), donc il est
-    // robuste face au scope retiré sur /registrations. Cf. doc Adlead :
-    // https://docs.adlead.immo/v1/leads.html#statut-d-un-lead
+    // ── CHECK STATUT LEAD & DISCARD ──────────────────────────────────────────
+    // Bloque si le statut lead indique un traitement actif (même ensemble que ci-dessus).
+    // "pending" et "to-process" ne bloquent pas.
     let leadBlocked = false;
     let blockReason = '';
-    let blockStatusKey = 'cancelled';
-    if (lead.is_under_prescription === true) {
+    const blockStatusKey = 'cancelled';
+    if (COMMERCIAL_ACTED_STATUSES.has(lead.status)) {
       leadBlocked = true;
-      blockReason = 'Lead sous prescription (is_under_prescription=true)';
-      blockStatusKey = 'denounced';
-    } else if (lead.status && lead.status !== 'to-process') {
-      leadBlocked = true;
-      blockReason = `Lead statut Adlead = "${lead.status}" (≠ to-process, voir doc Adlead statuts)`;
-      blockStatusKey = lead.status === 'discarded' ? 'cancelled' : 'cancelled';
+      blockReason = `Lead statut Adlead = "${lead.status}" (traitement actif détecté)`;
     } else if (lead.discard_reason) {
       leadBlocked = true;
       blockReason = `Lead discardé (discard_reason=${lead.discard_reason})`;
     }
     if (leadBlocked) {
-      console.log(`[process] lead ${entry.leadId} BLOQUÉ par check robuste : ${blockReason} → on n'envoie pas (status=${blockStatusKey})`);
+      console.log(`[process] lead ${entry.leadId} BLOQUÉ : ${blockReason} → on n'envoie pas`);
       return finalize({
         id: entry.interestId,
         status: blockStatusKey,
@@ -1528,7 +1536,7 @@ async function processPendingLead(entry) {
         programId: entry.programId,
         programName: interest.program?.name || '',
         leadStatus: lead.status || null,
-        isUnderPrescription: lead.is_under_prescription === true,
+        isUnderPrescription: false,
         discardReason: lead.discard_reason || null,
       });
     }
@@ -2086,22 +2094,22 @@ app.get('/api/stats', (req, res) => {
     const key = d.toISOString().slice(0, 10);
     const bucket = {
       date: key,
-      sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0,
+      sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0, excluded: 0,
       whatsappSent: 0, whatsappError: 0,
     };
     byDayMap[key] = bucket;
     byDay.push(bucket);
   }
 
-  const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0 };
+  const counts = { sent: 0, cancelled: 0, optout: 0, skipped: 0, error: 0, denounced: 0, excluded: 0 };
   const whatsapp = { enabledLeads: 0, sent: 0, error: 0, skipped: 0, delivered: 0, read: 0, failed: 0 };
   let manualOverrideCount = 0;
   // byProgram enrichi : pour chaque programme on stocke un objet avec le détail
   // des statuts au lieu d'un simple total, pour pouvoir afficher un mini-tableau
   // dans le dashboard (sent / denounced / failClosed / taux).
   const byProgram = {};
-  const today = { sent: 0, cancelled: 0, optout: 0, denounced: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
-  const week  = { sent: 0, cancelled: 0, optout: 0, denounced: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
+  const today = { sent: 0, cancelled: 0, optout: 0, denounced: 0, excluded: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
+  const week  = { sent: 0, cancelled: 0, optout: 0, denounced: 0, excluded: 0, skipped: 0, total: 0, whatsappSent: 0, whatsappError: 0, failClosed: 0 };
   // Compteurs pour la santé des services externes — on scanne les leads récents
   // (< 1 h) pour détecter des erreurs Twilio / Power Automate et déduire l'état.
   const RECENT = 60 * 60 * 1000; // 1 h
