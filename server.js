@@ -4286,14 +4286,14 @@ function isJ15Candidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j15Relances || 0;
-  // Fenêtre stricte [n+15, n+16[ depuis processedAt — limite les appels Adlead à ~1/lead/jour.
-  // Si last_interaction_at plus récent repousse l'éligibilité, processJ15Candidate pose
-  // record.j15RetryAfter (date YYYY-MM-DD) et on re-candidate à cette date.
+  // Fenêtre ouverte : >= seuil + borne haute pour éviter de boucler indéfiniment.
+  // Pas de fenêtre stricte d'1 jour : si le cron saute (ex. dimanche), le lead
+  // est rattrapé le lendemain au lieu d'être définitivement perdu.
   const todayYmd = new Date().toISOString().slice(0, 10);
   if (record.j15RetryAfter && todayYmd >= record.j15RetryAfter && n < 3) return true;
-  if (n === 0 && ageDays >= 15 && ageDays < 16) return true;
-  if (n === 1 && ageDays >= 16 && ageDays < 17) return true;
-  if (n === 2 && ageDays >= 17 && ageDays < 18) return true;
+  if (n === 0 && ageDays >= 15 && ageDays < 25) return true;
+  if (n === 1 && ageDays >= 16 && ageDays < 25) return true;
+  if (n === 2 && ageDays >= 17 && ageDays < 25) return true;
   return false;
 }
 
