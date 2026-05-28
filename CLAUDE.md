@@ -68,6 +68,24 @@ Séquence : 3 envois sur 3 jours — email "je classe ton dossier" → WhatsApp 
 Arrêt immédiat si `lead.status !== 'pending'`.
 Fenêtre : lundi–samedi 9h–20h Paris. Un lead skippé un dimanche est rattrapé le lundi.
 
+## Templates email — NE PAS MODIFIER (figés le 2026-05-28)
+
+Structure identique sur les 7 templates (J+1, J+3 ×3, J+15 ×3). Ne jamais modifier sans validation Norman.
+
+**J+1 (`buildEmailBody`)** :
+- Salutation : `buildSalutation(contact)` → `Monsieur/Madame Nom` ou fallback `Madame, Monsieur`
+- Accroche : `stripAccrochePrefix(accroche, ville, promoteur)` — retire le préfixe "À [ville], … par [promoteur]" car déjà mentionné dans la phrase précédente. Résultat : l'accroche commence par le nom du programme.
+- Brochure : bouton HTML `brochureButton(url)` dans le corps — lien vers `/brochures/slug.pdf` sur Railway. **Uniquement sur J+1.**
+- Signature complète (nom, titre, adresse, tel, email, web).
+
+**J+3 et J+15 (6 templates)** :
+- Salutation : `buildSalutation(contact)` — même logique que J+1.
+- Accroche : paragraph `<em>accroche</em>` (texte complet depuis `programmes.json`, sans strip — déjà cohérent en standalone).
+- **Pas de brochure** (retirée volontairement le 2026-05-28).
+- Signature courte (`Norman DADON — Catella Residential — Logement neuf`).
+
+**`brochures.json`** : indexé par nom de programme (exact ou normalisé sans accents/casse). 34/58 programmes couverts. Les 24 sans PDF enverront l'email sans bouton brochure (silencieux, pas de skip).
+
 ## Check dénonciation (post-incident 2026-05-06)
 
 Bloque l'envoi si **au moins une** des conditions ci-dessus (voir règle J+1).
