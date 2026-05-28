@@ -27,7 +27,7 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 | Règle | Quand | État actuel | Kill switches |
 |---|---|---|---|
 | **R1 — J+1** | T+24h après webhook (ou immédiat pour `INSTANT_PROGRAM_IDS`) | **Auto-send ACTIVÉ** — le pipeline envoie automatiquement email + WhatsApp | `J1_AUTO_SEND_DISABLED=false` (variable absente = auto-send actif) |
-| **R2 — J+3 matin** | Cron 9h15 Paris, scan des leads en statut Adlead `pending` depuis ≥24h, 3 jours d'escalation (email doux → WhatsApp template → email final) | Activé en pilote, **`J3M_SEND_DISABLED=true` actuellement** (dry-run seulement) | `J3M_ENABLED`, `J3M_SEND_DISABLED`, `WHATSAPP_J3M_ENABLED` |
+| **R2 — J+3 matin** | Cron 9h15 Paris, scan des leads en statut Adlead `pending` depuis ≥24h, 3 jours d'escalation (email doux → WhatsApp template → email final) | **Actif en prod** (`J3M_SEND_DISABLED=false`) | `J3M_ENABLED`, `J3M_SEND_DISABLED`, `WHATSAPP_J3M_ENABLED` |
 | **R3 — J+15** | Cron 10h Paris, scan des leads en stagnation `pending`, 3 jours d'escalation à J+15/+16/+17 sur `last_interaction_at` | Activé, mais `TWILIO_TEMPLATE_RELANCE_J15` vide (fallback email) | `J15_ENABLED`, `J15_SEND_DISABLED`, `WHATSAPP_J15_ENABLED` |
 
 **Toutes les règles s'arrêtent dès que `lead.status ≠ "pending"`** (= prospect a répondu OU commercial a re-statué). Et toutes respectent la fenêtre 9h-20h Paris + blocage dimanche (`SEND_HOUR_START_PARIS` / `SEND_HOUR_END_PARIS`).
