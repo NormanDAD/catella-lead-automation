@@ -4299,12 +4299,12 @@ function isJ15Candidate(record, now) {
 
 // ─── Templates email règle 3 (3 jours : J+15 / J+16 / J+17) ─────────────────
 
-function buildJ15Day1Email(firstName, programName, brochureUrl) {
+function buildJ15Day1Email(salutation, programName, accroche) {
   const subject = `${programName} — votre dossier toujours actif ?`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Cela fait maintenant 2 semaines que je tentais de vous joindre concernant votre demande sur ${programName}. Je n'ai pas eu votre retour à mes messages précédents.</p>
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Avant de classer définitivement votre dossier, je souhaitais m'assurer qu'on ne passait pas à côté d'une opportunité pour vous. Le programme évolue toujours et il reste actuellement des biens disponibles.</p>
-${brochureUrl ? `<p>Pour vous permettre de vous replonger dans le programme, je vous partage à nouveau la brochure :${brochureButton(brochureUrl)}</p>` : ''}
 <p>Un mot de vous suffit pour que je vous transmette les éléments à jour.</p>
 <p>Très cordialement,<br/>
 Norman DADON<br/>
@@ -4313,12 +4313,11 @@ Catella Residential — Logement neuf</p>`;
   return { subject, html };
 }
 
-function buildJ15Day2Fallback(firstName, programName) {
-  // Fallback email pour J+16 si le template WhatsApp Meta n'est pas approuvé
-  // ou si on n'a pas de téléphone. Reprend le wording WhatsApp validé.
+function buildJ15Day2Fallback(salutation, programName, accroche) {
   const subject = `${programName} — quelques disponibilités à étudier`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Je reviens une dernière fois vers vous concernant votre demande sur ${programName}.</p>
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Notre stock évolue rapidement, et les meilleures opportunités partent vite. Si votre projet reste d'actualité, je peux vous transmettre les disponibilités à jour aujourd'hui.</p>
 <p>Souhaitez-vous que je vous rappelle ?</p>
 <p>Norman DADON<br/>
@@ -4327,10 +4326,11 @@ Catella Residential — Logement neuf</p>`;
   return { subject, html };
 }
 
-function buildJ15Day3Email(firstName, programName) {
+function buildJ15Day3Email(salutation, programName, accroche) {
   const subject = `${programName} — clôture de votre dossier`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Sans nouvelles de votre part malgré mes différentes tentatives, je vais clôturer définitivement votre dossier sur ${programName} aujourd'hui.</p>
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Si votre projet immobilier évolue dans les semaines à venir et que vous souhaitez revoir ce programme ou d'autres opportunités de notre portefeuille, n'hésitez pas à me recontacter directement à cette adresse.</p>
 <p>Je vous souhaite une bonne continuation dans vos recherches.</p>
 <p>Cordialement,<br/>
@@ -4410,7 +4410,9 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     return { skipped: true, reason: `programme non résolu (programId=${record.programId})` };
   }
 
-  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
+  const salutation = buildSalutation(contact);
+  const programmeEntry = findProgramme(programName);
+  const accroche = (programmeEntry && programmeEntry.accroche) || '';
 
   // Gate fenêtre horaire (règle Norman 2026-05-18) — pas d'envoi hors 9h-20h
   // Paris ni le dimanche. Skip sans incrémenter counter → re-tenté demain.
@@ -4422,7 +4424,7 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   let channel, subject = null, html = null, whatsappTo = null;
   if (dayNumber === 1) {
     channel = 'email';
-    ({ subject, html } = buildJ15Day1Email(firstName, programName, getBrochureUrl(programName)));
+    ({ subject, html } = buildJ15Day1Email(salutation, programName, accroche));
   } else if (dayNumber === 2) {
     if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_J16) {
       channel = 'whatsapp';
@@ -4430,11 +4432,11 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     } else {
       // Fallback email si template Meta J+16 pas dispo (ou WhatsApp J+15 désactivé).
       channel = 'email-fallback';
-      ({ subject, html } = buildJ15Day2Fallback(firstName, programName));
+      ({ subject, html } = buildJ15Day2Fallback(salutation, programName, accroche));
     }
   } else { // dayNumber === 3
     channel = 'email';
-    ({ subject, html } = buildJ15Day3Email(firstName, programName));
+    ({ subject, html } = buildJ15Day3Email(salutation, programName, accroche));
   }
 
   // GATE — dry-run ou kill switch → return without sending (cf incident 2026-05-15).
@@ -4690,11 +4692,11 @@ function isJ3MCandidate(record, now) {
   return false;
 }
 
-function buildJ3MEmailDay1(firstName, programName, brochureUrl) {
+function buildJ3MEmailDay1(salutation, programName, accroche) {
   const subject = `Petit point sur votre demande ${programName}`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Petit point rapide concernant votre demande pour ${programName}. Je n'ai pas encore eu votre retour suite à mes premiers messages, et je préférais m'assurer que vous les avez bien reçus.</p>
-${brochureUrl ? `<p>En attendant notre échange, retrouvez ici la brochure du programme :${brochureButton(brochureUrl)}</p>` : ''}
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Avez-vous quelques minutes pour qu'on échange brièvement de votre projet ? Vous pouvez réserver un créneau directement ici :<br/>
 <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
 <p>Au plaisir d'échanger,<br/>
@@ -4704,12 +4706,11 @@ Catella Residential — Logement neuf</p>`;
   return { subject, html };
 }
 
-function buildJ3MEmailDay2Fallback(firstName, programName) {
-  // Fallback email pour le jour 2 quand le template WhatsApp Meta n'est pas
-  // disponible. Reprend le wording WhatsApp validé par Norman.
+function buildJ3MEmailDay2Fallback(salutation, programName, accroche) {
   const subject = `${programName} — disponibilités à étudier`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Je reviens vers vous concernant votre demande sur ${programName}.</p>
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Je viens de regarder le programme : nous avons encore des disponibilités. Si votre projet est toujours d'actualité, c'est le moment d'en discuter. N'hésitez pas à me donner vos critères d'acquisition.</p>
 <p>Ou discutons : avez-vous 10 minutes cette semaine ? Réservation directe ici :<br/>
 <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
@@ -4719,10 +4720,11 @@ Catella Residential — Logement neuf</p>`;
   return { subject, html };
 }
 
-function buildJ3MEmailDay3(firstName, programName) {
+function buildJ3MEmailDay3(salutation, programName, accroche) {
   const subject = `${programName} — dernier point avant de classer votre dossier`;
-  const html = `<p>Bonjour ${firstName},</p>
+  const html = `<p>Bonjour ${salutation},</p>
 <p>Dernier message de ma part concernant ${programName}.</p>
+${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Sans nouvelles, je vais classer votre dossier en fin de semaine. Si votre projet immobilier est toujours d'actualité, c'est vraiment le moment de me le faire savoir.</p>
 <ul>
 <li>Réservez un créneau ici pour qu'on échange : <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></li>
@@ -4812,7 +4814,9 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     return { skipped: true, reason: `programme non résolu (programId=${record.programId})` };
   }
 
-  const firstName = contact.firstname || (contact.fullname || record.contactName || '').split(' ')[0] || 'bonjour';
+  const salutation = buildSalutation(contact);
+  const programmeEntry = findProgramme(programName);
+  const accroche = (programmeEntry && programmeEntry.accroche) || '';
 
   // Gate fenêtre horaire (règle Norman 2026-05-18) — pas d'envoi hors 9h-20h
   // Paris ni le dimanche. Skip sans incrémenter counter → re-tenté demain.
@@ -4824,7 +4828,7 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   let channel, subject = null, html = null, whatsappTo = null;
   if (dayNumber === 1) {
     channel = 'email';
-    ({ subject, html } = buildJ3MEmailDay1(firstName, programName, getBrochureUrl(programName)));
+    ({ subject, html } = buildJ3MEmailDay1(salutation, programName, accroche));
   } else if (dayNumber === 2) {
     if (CONFIG.WHATSAPP_J3M_ENABLED && CONFIG.TWILIO_TEMPLATE_J3M_DAY2) {
       channel = 'whatsapp';
@@ -4832,11 +4836,11 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     } else {
       // Fallback email pour ne pas casser le cycle d'escalation.
       channel = 'email-fallback';
-      ({ subject, html } = buildJ3MEmailDay2Fallback(firstName, programName));
+      ({ subject, html } = buildJ3MEmailDay2Fallback(salutation, programName, accroche));
     }
   } else { // dayNumber === 3
     channel = 'email';
-    ({ subject, html } = buildJ3MEmailDay3(firstName, programName));
+    ({ subject, html } = buildJ3MEmailDay3(salutation, programName, accroche));
   }
 
   // GATE CRITIQUE (cf incident 2026-05-15) — en dry-run ou sendDisabled,
