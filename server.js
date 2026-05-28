@@ -1086,7 +1086,7 @@ function buildEmailSubject(ctx) {
 function buildEmailBody(ctx) {
   // Accroche programme intégrée dans la phrase d'ouverture (quand elle existe)
   const accrochePhrase = ctx.accroche_programme
-    ? ` <em>${escapeHtml(ctx.accroche_programme)}</em> — il pourrait bien répondre à toutes vos attentes !`
+    ? ` <em>${escapeHtml(ctx.accroche_programme)}</em>`
     : '';
 
   return `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #222;">
