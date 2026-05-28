@@ -32,13 +32,21 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 
 **Toutes les règles s'arrêtent dès que `lead.status ≠ "pending"`** (= prospect a répondu OU commercial a re-statué). Et toutes respectent la fenêtre 9h-20h Paris + blocage dimanche (`SEND_HOUR_START_PARIS` / `SEND_HOUR_END_PARIS`).
 
+## Règle d'envoi J+1 — NE PAS MODIFIER (figée le 2026-05-28)
+
+Le pipeline envoie email + WhatsApp si ET SEULEMENT SI toutes ces conditions sont vraies :
+1. `lead.is_under_prescription !== true` (sinon → `denounced`, priorité absolue)
+2. `lead.status` est `to-process` OU `pending` (affecté mais non traité)
+3. `interest.status` n'est pas dans les statuts actifs (`ongoing`, `to-follow`, `interested`, `negotiating`, `discarded`, `pending-purchaser`, `purchaser`)
+4. `last_interaction_at` n'est PAS postérieur à `receivedAt` + 1 min (sinon → commercial a agi dans Adlead)
+5. `lead.discard_reason` est null
+
+Résumé : **`to-process` ou `pending` sans action commerciale → on envoie. Tout le reste → on n'envoie pas.**
+Cette règle a été définie et validée par Norman le 2026-05-28 après incident. Ne pas la changer sans validation explicite.
+
 ## Check dénonciation (post-incident 2026-05-06)
 
-Bloque l'envoi si **au moins une** des 3 conditions sur le lead fetché via `/programs/{pid}/leads/{lid}` :
-1. `is_under_prescription === true` → status `denounced`
-2. `lead.status ≠ "to-process"` → status `cancelled`
-3. `lead.discard_reason` non null → status `cancelled`
-
+Bloque l'envoi si **au moins une** des conditions ci-dessus (voir règle J+1).
 L'ancien check via `/registrations` est désactivé par défaut (`SKIP_REGISTRATIONS_CHECK=true`) — clé API n'a plus le scope, et Adlead filtre à la source.
 
 ## Env vars critiques (Railway, pas .env local)
