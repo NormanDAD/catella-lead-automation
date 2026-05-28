@@ -203,7 +203,7 @@ const CONFIG = {
   // PIPELINE_DISABLED : option nucléaire — le scheduler tick ne traite plus
   //   aucun lead. Le webhook continue à encaisser (rien n'est perdu), mais
   //   ni mail prospect ni notif interne ni WhatsApp ne partent.
-  PIPELINE_DISABLED: true, // PAUSE URGENCE 2026-05-28 — retirer dès bug identifié
+  PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
   ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
   // Mot de passe dashboard. Si vide → pas d'auth (rétrocompat dev local).
   DASHBOARD_PASSWORD:    process.env.DASHBOARD_PASSWORD || '',
@@ -1543,7 +1543,7 @@ async function processPendingLead(entry) {
     } else if (interestSource !== 'rawPayload (webhook T0)' && interest.status && COMMERCIAL_ACTED_STATUSES.has(interest.status)) {
       commercialActed = true;
       reason = `Statut interest = "${interest.status}"`;
-    } else if (lead.last_interaction_at && entry.receivedAt && COMMERCIAL_ACTED_STATUSES.has(lead.status)) {
+    } else if (lead.last_interaction_at && entry.receivedAt) {
       const li = new Date(lead.last_interaction_at).getTime();
       const rc = new Date(entry.receivedAt).getTime();
       if (li > rc + 60_000) { // marge 1 min pour ignorer l'événement de création
