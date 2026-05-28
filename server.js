@@ -203,7 +203,7 @@ const CONFIG = {
   // PIPELINE_DISABLED : option nucléaire — le scheduler tick ne traite plus
   //   aucun lead. Le webhook continue à encaisser (rien n'est perdu), mais
   //   ni mail prospect ni notif interne ni WhatsApp ne partent.
-  PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
+  PIPELINE_DISABLED: true, // PAUSE URGENCE 2026-05-28 — retirer dès bug identifié
   ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
   // Mot de passe dashboard. Si vide → pas d'auth (rétrocompat dev local).
   DASHBOARD_PASSWORD:    process.env.DASHBOARD_PASSWORD || '',
