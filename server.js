@@ -205,6 +205,8 @@ const CONFIG = {
   //   ni mail prospect ni notif interne ni WhatsApp ne partent.
   PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
   ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
+  // Mot de passe dashboard. Si vide → pas d'auth (rétrocompat dev local).
+  DASHBOARD_PASSWORD:    process.env.DASHBOARD_PASSWORD || '',
   PORT:                  process.env.PORT || 3000,
 };
 
@@ -471,6 +473,57 @@ app.use('/api/admin', requireAdmin);
 app.use('/api/test', requireAdmin);
 app.use('/api/scheduler', requireAdmin);
 app.use('/api/reply-handler', requireAdmin);
+
+// ── AUTHENTIFICATION DASHBOARD ────────────────────────────────────────────────
+// Cookie signé HMAC-SHA256. Session valide 30 jours (renouvelée à chaque visite).
+// Routes toujours publiques : /webhook/*, /api/health, /login, /logout.
+// Si DASHBOARD_PASSWORD est vide (dev local) → auth désactivée.
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k) cookies[k.trim()] = decodeURIComponent(v.join('=').trim());
+  }
+  return cookies;
+}
+
+function dashboardSessionToken() {
+  const secret = CONFIG.ADMIN_UPLOAD_TOKEN || 'dev-secret';
+  return require('crypto').createHmac('sha256', secret).update('dash-v1').digest('hex');
+}
+
+function isDashboardAuthenticated(req) {
+  if (!CONFIG.DASHBOARD_PASSWORD) return true;
+  const cookies = parseCookies(req);
+  return cookies.dash_session === dashboardSessionToken();
+}
+
+function setDashboardCookie(res) {
+  const token = dashboardSessionToken();
+  const maxAge = 30 * 24 * 60 * 60; // 30 jours
+  res.setHeader('Set-Cookie', `dash_session=${token}; HttpOnly; SameSite=Strict; Max-Age=${maxAge}; Path=/`);
+}
+
+function clearDashboardCookie(res) {
+  res.setHeader('Set-Cookie', 'dash_session=; HttpOnly; SameSite=Strict; Max-Age=0; Path=/');
+}
+
+// Middleware global — protège tout sauf webhooks, health, login, logout.
+app.use((req, res, next) => {
+  const PUBLIC = ['/webhook/', '/api/health', '/login', '/logout'];
+  if (PUBLIC.some(p => req.path.startsWith(p))) return next();
+  if (isDashboardAuthenticated(req)) {
+    setDashboardCookie(res); // renouvelle la session à chaque visite
+    return next();
+  }
+  // API calls → 401 JSON. Navigation → redirect login.
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Non authentifié' });
+  }
+  res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
+});
 
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -1908,6 +1961,56 @@ async function processPendingLead(entry) {
 }
 
 // ─── ROUTES ─────────────────────────────────────────────────────────────────
+
+// GET /login — formulaire de connexion
+app.get('/login', (req, res) => {
+  if (isDashboardAuthenticated(req)) return res.redirect('/');
+  const next = req.query.next || '/';
+  const error = req.query.err ? '<p style="color:#c0392b;margin:0 0 16px;font-size:14px;">Mot de passe incorrect.</p>' : '';
+  res.type('html').send(`<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Catella — Connexion</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+  .card{background:white;border-radius:16px;padding:40px;width:100%;max-width:360px;box-shadow:0 4px 24px rgba(0,0,0,.08);}
+  .logo{font-size:22px;font-weight:700;color:#1a3a5c;margin-bottom:8px;}
+  .sub{font-size:13px;color:#6e6e73;margin-bottom:28px;}
+  label{display:block;font-size:13px;font-weight:600;color:#1d1d1f;margin-bottom:6px;}
+  input[type=password]{width:100%;padding:12px 14px;border:1px solid #d1d1d6;border-radius:8px;font-size:15px;outline:none;transition:border .15s;}
+  input[type=password]:focus{border-color:#1a3a5c;}
+  button{width:100%;margin-top:20px;padding:13px;background:#1a3a5c;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;}
+  button:hover{background:#152f4a;}
+</style></head><body>
+<div class="card">
+  <div class="logo">Catella Residential</div>
+  <div class="sub">Pipeline lead automation</div>
+  ${error}
+  <form method="POST" action="/login">
+    <input type="hidden" name="next" value="${next.replace(/"/g,'&quot;')}">
+    <label for="pwd">Mot de passe</label>
+    <input type="password" id="pwd" name="password" autofocus autocomplete="current-password" placeholder="••••••••">
+    <button type="submit">Se connecter</button>
+  </form>
+</div></body></html>`);
+});
+
+// POST /login — vérification mot de passe
+app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const { password, next } = req.body || {};
+  const redirectNext = (next && next.startsWith('/') && !next.startsWith('//')) ? next : '/';
+  if (!CONFIG.DASHBOARD_PASSWORD || password === CONFIG.DASHBOARD_PASSWORD) {
+    setDashboardCookie(res);
+    return res.redirect(redirectNext);
+  }
+  res.redirect('/login?err=1&next=' + encodeURIComponent(redirectNext));
+});
+
+// GET /logout
+app.get('/logout', (req, res) => {
+  clearDashboardCookie(res);
+  res.redirect('/login');
+});
 
 app.get('/api/health', (req, res) => {
   const dirCheck = checkDataDirWritable();
