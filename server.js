@@ -82,11 +82,10 @@ const CONFIG = {
   // Cron quotidien qui relance les leads dont le statut Adlead est "pending"
   // ("En attente de contact") et dont la dernière action commerciale date de
   // plus de J15_DELAY_DAYS jours. Kill switch global via J15_ENABLED.
-  // WhatsApp J+15 gated indépendamment via WHATSAPP_J15_ENABLED + TWILIO_TEMPLATE_RELANCE_J15.
+  // WhatsApp J+15 gated via WHATSAPP_J15_ENABLED + TWILIO_TEMPLATE_J16 (template jour 2 = J+16).
   J15_ENABLED:           process.env.J15_ENABLED === 'true',
   J15_DELAY_DAYS:        Number(process.env.J15_DELAY_DAYS || 15),
   J15_CRON_HOUR_PARIS:   Number(process.env.J15_CRON_HOUR_PARIS || 10),
-  TWILIO_TEMPLATE_RELANCE_J15: process.env.TWILIO_TEMPLATE_RELANCE_J15 || '',
   WHATSAPP_J15_ENABLED:  process.env.WHATSAPP_J15_ENABLED === 'true',
   // Kill switch BELT-AND-SUSPENDERS pour les envois J+15 : si true, AUCUN
   // sendEmail / sendWhatsApp ne peut partir depuis le code path J+15, même
@@ -1929,7 +1928,7 @@ app.get('/api/health', (req, res) => {
       j15DelayDays: CONFIG.J15_DELAY_DAYS,
       j15CronHourParis: CONFIG.J15_CRON_HOUR_PARIS,
       j15WhatsappEnabled: CONFIG.WHATSAPP_J15_ENABLED,
-      j15TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J15,
+      j15WhatsappReady: CONFIG.WHATSAPP_J15_ENABLED && !!CONFIG.TWILIO_TEMPLATE_J16,
       j3mEnabled: CONFIG.J3M_ENABLED,
       j3mSendDisabled: CONFIG.J3M_SEND_DISABLED,
       j3mCronHourParis: CONFIG.J3M_CRON_HOUR_PARIS,
