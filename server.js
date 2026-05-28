@@ -4680,12 +4680,13 @@ function isJ3MCandidate(record, now) {
   if (!refMs) return false;
   const ageDays = (now - refMs) / (1000 * 60 * 60 * 24);
   const n = record.j3mRelances || 0;
-  // Fenêtre stricte [n+3, n+4[ + retryAfter pour ne pas rater les leads skippés.
+  // Fenêtre ouverte : >= seuil + < 14j (pas de chevauchement avec J+15).
+  // Pas de fenêtre stricte d'1 jour : si le cron saute, le lead est rattrapé le lendemain.
   const todayYmd = new Date().toISOString().slice(0, 10);
   if (record.j3mRetryAfter && todayYmd >= record.j3mRetryAfter && n < 3) return true;
-  if (n === 0 && ageDays >= 3 && ageDays < 4) return true;
-  if (n === 1 && ageDays >= 4 && ageDays < 5) return true;
-  if (n === 2 && ageDays >= 5 && ageDays < 6) return true;
+  if (n === 0 && ageDays >= 3 && ageDays < 14) return true;
+  if (n === 1 && ageDays >= 4 && ageDays < 14) return true;
+  if (n === 2 && ageDays >= 5 && ageDays < 14) return true;
   return false;
 }
 
@@ -4758,17 +4759,16 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     return { skipped: true, reason: `lead.status="${lead.status}" (≠ pending)`, reset };
   }
 
-  // Trigger via Adlead `last_interaction_at` (date dernière action commerciale).
-  // Fallback sur record.processedAt (date envoi J+1) si null — permet de déclencher
-  // J+3 même quand le commercial n'a pas posé d'action Adlead explicite
-  // (PATCH /leads non dispo actuellement → last_interaction_at rarement mis à jour).
-  // Cadence J+3 / J+4 / J+5 depuis cette date :
-  //   counter=0 + daysSinceLastAction >= 3 → send #1 (doux)
-  //   counter=1 + daysSinceLastAction >= 4 → send #2 (moyen)
-  //   counter=2 + daysSinceLastAction >= 5 → send #3 (final)
-  const j3mRefDate = lead.last_interaction_at || record.processedAt;
+  // Référence = date d'envoi J+1 (record.processedAt), pas last_interaction_at.
+  // Raison : last_interaction_at est mis à jour à chaque action commerciale (appel, note…),
+  // ce qui réinitialiserait le compteur 3 jours et retarderait indéfiniment J+3.
+  // Cadence J+3 / J+4 / J+5 depuis processedAt :
+  //   counter=0 + ageDays >= 3 → send #1 (email doux)
+  //   counter=1 + ageDays >= 4 → send #2 (WhatsApp ou email)
+  //   counter=2 + ageDays >= 5 → send #3 (email final)
+  const j3mRefDate = record.processedAt;
   if (!j3mRefDate) {
-    return { skipped: true, reason: 'last_interaction_at et processedAt tous deux null' };
+    return { skipped: true, reason: 'processedAt null' };
   }
   const daysSinceLastAction = (Date.now() - new Date(j3mRefDate).getTime()) / (1000 * 60 * 60 * 24);
   const currentCount = record.j3mRelances || 0;
