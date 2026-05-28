@@ -1077,9 +1077,9 @@
         <div class="kpi-delta" id="kpi-proactivity-sub">Commercial avant pipeline</div>
       </div>
       <div class="kpi-card accent-green clickable" onclick="window.open('/conversations','_blank')">
-        <div class="kpi-label">Réponses WhatsApp<span class="info-icon" onclick="event.stopPropagation()" data-info="Réponses reçues des prospects sur WhatsApp. Tu reçois aussi une notif Telegram. Click pour voir les conversations.">i</span></div>
+        <div class="kpi-label">Réponses WhatsApp<span class="info-icon" onclick="event.stopPropagation()" data-info="Nombre de prospects uniques qui ont répondu sur WhatsApp (= conversations). Le sous-titre indique le total de messages reçus. Click pour voir les conversations.">i</span></div>
         <div class="kpi-value" id="kpi-wa-replies">—</div>
-        <div class="kpi-delta">Messages reçus prospects</div>
+        <div class="kpi-delta" id="kpi-wa-replies-sub">Prospects ayant répondu</div>
       </div>
       <div class="kpi-card accent-purple">
         <div class="kpi-label">Taux d'efficacité<span class="info-icon" data-info="Envoyés / (envoyés + annulés + dénoncés + opt-out). Mesure la proportion de leads que le pipeline a dû traiter parmi tous les leads décidés.">i</span></div>
@@ -1712,7 +1712,9 @@
       if (!res.ok) return;
       const all = await res.json();
       const replies = all.filter(r => r.status === 'whatsapp_reply_received');
-      el('kpi-wa-replies').textContent = fmt.format(replies.length);
+      const uniqueWaPhones = new Set(replies.map(r => r.whatsappFrom).filter(Boolean));
+      el('kpi-wa-replies').textContent = fmt.format(uniqueWaPhones.size);
+      el('kpi-wa-replies-sub').textContent = `${replies.length} message${replies.length !== 1 ? 's' : ''} reçus au total`;
     } catch (e) { /* silencieux */ }
   }
 
