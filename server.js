@@ -1493,12 +1493,12 @@ async function processPendingLead(entry) {
     console.log(`[debug] interest ${entry.interestId} (source=${interestSource}) — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
 
     // ── CHECK AGENT EN PAUSE (PAUSED_AGENTS) ─────────────────────────────────
+    const trackerName = (obj) => {
+      if (!obj) return '';
+      if (typeof obj === 'string') return obj.toLowerCase();
+      return (obj.fullname || obj.full_name || obj.name || obj.display_name || obj.email || '').toLowerCase();
+    };
     if (CONFIG.PAUSED_AGENTS.length > 0) {
-      const trackerName = (obj) => {
-        if (!obj) return '';
-        if (typeof obj === 'string') return obj.toLowerCase();
-        return (obj.fullname || obj.full_name || obj.name || obj.display_name || obj.email || '').toLowerCase();
-      };
       const t1 = trackerName(interest.first_tracker);
       const t2 = trackerName(interest.last_tracker);
       const today = new Date().toISOString().slice(0, 10);
@@ -1554,12 +1554,23 @@ async function processPendingLead(entry) {
     } else if (interestSource !== 'rawPayload (webhook T0)' && interest.status && COMMERCIAL_ACTED_STATUSES.has(interest.status)) {
       commercialActed = true;
       reason = `Statut interest = "${interest.status}"`;
-    } else if (lead.last_interaction_at && entry.receivedAt) {
-      const li = new Date(lead.last_interaction_at).getTime();
+    } else if (entry.receivedAt) {
       const rc = new Date(entry.receivedAt).getTime();
-      if (li > rc + 60_000) { // marge 1 min pour ignorer l'événement de création
-        commercialActed = true;
-        reason = `last_interaction_at (${lead.last_interaction_at}) postérieur à receivedAt (${entry.receivedAt})`;
+      // Vérifie last_interaction_at au niveau du lead ET de l'interest
+      // (Adlead met parfois à jour l'un sans l'autre selon le type d'action)
+      const timestamps = [
+        lead.last_interaction_at,
+        interest.last_interaction_at,
+        interest.updated_at,
+      ];
+      for (const ts of timestamps) {
+        if (!ts) continue;
+        const li = new Date(ts).getTime();
+        if (li > rc + 60_000) {
+          commercialActed = true;
+          reason = `Activité détectée (${ts}) postérieure à receivedAt (${entry.receivedAt})`;
+          break;
+        }
       }
     }
     if (commercialActed) {
