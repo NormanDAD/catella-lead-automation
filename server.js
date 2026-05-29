@@ -1452,7 +1452,19 @@ async function processPendingLead(entry) {
     //    qui renvoie le lead COMPLET (status, is_under_prescription, discard_reason).
     //    Indispensable pour le check robuste dénonciation/statut plus bas.
     const lead = await fetchLead(entry.leadId, { programId: entry.programId });
-    console.log(`[debug] lead ${entry.leadId} — keys: ${Object.keys(lead || {}).join(',')}`);
+    // Log exhaustif pour diagnostiquer quels champs Adlead met à jour lors d'actions commerciales
+    const _diagLead = {
+      status: lead?.status,
+      last_interaction_at: lead?.last_interaction_at,
+      updated_at: lead?.updated_at,
+      last_event_at: lead?.last_event_at,
+      last_activity_at: lead?.last_activity_at,
+      contacted_at: lead?.contacted_at,
+      assigned_at: lead?.assigned_at,
+      events_count: Array.isArray(lead?.events) ? lead.events.length : lead?.events_count ?? 'n/a',
+      activities_count: Array.isArray(lead?.activities) ? lead.activities.length : 'n/a',
+    };
+    console.log(`[diag] lead ${entry.leadId} timestamps+status:`, JSON.stringify(_diagLead));
     // Essaie plusieurs variantes de nommage pour le sous-champ interests
     const maybeInterestsArr = lead?.interests || lead?.interest || lead?.program_interests || lead?.programs || null;
     if (Array.isArray(maybeInterestsArr)) {
@@ -1490,7 +1502,15 @@ async function processPendingLead(entry) {
         error: `Interest ${entry.interestId} introuvable (aucune source disponible)`,
       });
     }
-    console.log(`[debug] interest ${entry.interestId} (source=${interestSource}) — keys: ${Object.keys(interest).join(',')} — status=${interest.status}`);
+    const _diagInterest = {
+      status: interest?.status,
+      last_interaction_at: interest?.last_interaction_at,
+      updated_at: interest?.updated_at,
+      last_event_at: interest?.last_event_at,
+      contacted_at: interest?.contacted_at,
+      source: interestSource,
+    };
+    console.log(`[diag] interest ${entry.interestId}:`, JSON.stringify(_diagInterest));
 
     // ── CHECK AGENT EN PAUSE (PAUSED_AGENTS) ─────────────────────────────────
     const trackerName = (obj) => {
