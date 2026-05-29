@@ -512,7 +512,7 @@ function clearDashboardCookie(res) {
 
 // Middleware global — protège tout sauf webhooks, health, login, logout.
 app.use((req, res, next) => {
-  const PUBLIC = ['/webhook/', '/api/health', '/login', '/logout'];
+  const PUBLIC = ['/webhook/', '/api/health', '/login', '/logout', '/brochures/'];
   if (PUBLIC.some(p => req.path.startsWith(p))) return next();
   if (isDashboardAuthenticated(req)) {
     setDashboardCookie(res); // renouvelle la session à chaque visite

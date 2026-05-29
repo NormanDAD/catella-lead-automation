@@ -1029,11 +1029,7 @@
         <div class="kpi-value" id="kpi-cancelled">—</div>
         <div class="kpi-delta">A agi avant J+1</div>
       </div>
-      <div class="kpi-card clickable" onclick="openModal('denounced')">
-        <div class="kpi-label">Dénoncés<span class="info-icon" onclick="event.stopPropagation()" data-info="Leads où un ERP / prescripteur a la main (is_under_prescription=true). Le pipeline ne relance jamais ces leads pour éviter tout conflit commercial.">i</span></div>
-        <div class="kpi-value" id="kpi-denounced">—</div>
-        <div class="kpi-delta">ERP / prescripteur</div>
-      </div>
+
       <div class="kpi-card">
         <div class="kpi-label">Exclus<span class="info-icon" data-info="Leads de programmes dans EXCLUDED_PROGRAM_IDS — le pipeline est désactivé sur ces programmes.">i</span></div>
         <div class="kpi-value" id="kpi-excluded">—</div>
@@ -1109,11 +1105,6 @@
     <div class="eq-item eq-cancel" onclick="openModal('cancelled')">
       <div class="eq-value" id="eq-cancelled">—</div>
       <div class="eq-label">Annulés</div>
-    </div>
-    <div class="eq-sep">+</div>
-    <div class="eq-item eq-den" onclick="openModal('denounced')">
-      <div class="eq-value" id="eq-denounced">—</div>
-      <div class="eq-label">Dénoncés</div>
     </div>
     <div class="eq-sep">+</div>
     <div class="eq-item eq-skip" onclick="openModal('skipped')">
@@ -1396,14 +1387,13 @@
           </div>
         `;
       }
-      const eligible = (data.sent || 0) + (data.cancelled || 0) + (data.optout || 0) + (data.denounced || 0);
+      const eligible = (data.sent || 0) + (data.cancelled || 0) + (data.optout || 0);
       const rate = eligible > 0 ? Math.round((data.sent / eligible) * 1000) / 10 : null;
       const rateHtml = rate != null
         ? `<div class="prog-rate"><strong>${rate}%</strong> envoyé</div>`
         : '';
       const chips = [];
       if (data.sent)       chips.push(`<span class="prog-chip sent">${data.sent} env.</span>`);
-      if (data.denounced)  chips.push(`<span class="prog-chip denounced">${data.denounced} dénoncé${data.denounced>1?'s':''}</span>`);
       if (data.failClosed) chips.push(`<span class="prog-chip failclosed">${data.failClosed} à traiter</span>`);
       if (data.optout)     chips.push(`<span class="prog-chip optout">${data.optout} opt-out</span>`);
       if (data.cancelled)  chips.push(`<span class="prog-chip">${data.cancelled} annulés</span>`);
@@ -1565,7 +1555,6 @@
       el('kpi-sent-total').textContent = fmt.format(d.counts?.sent || 0);
       el('kpi-sent-sub').textContent = `dont ${d.whatsapp?.sent || 0} avec WhatsApp`;
       el('kpi-cancelled').textContent = fmt.format(d.counts?.cancelled || 0);
-      el('kpi-denounced').textContent = fmt.format(d.counts?.denounced || 0);
       el('kpi-excluded').textContent = fmt.format(d.counts?.excluded || 0);
       el('kpi-skipped').textContent = fmt.format(d.counts?.skipped || 0);
       el('kpi-errors').textContent = fmt.format(d.counts?.error || 0);
@@ -1575,7 +1564,6 @@
       // ── Equation row
       el('eq-sent').textContent      = fmt.format(d.today?.sent || 0);
       el('eq-cancelled').textContent = fmt.format(d.today?.cancelled || 0);
-      el('eq-denounced').textContent = fmt.format(d.today?.denounced || 0);
       el('eq-skipped').textContent   = fmt.format(d.today?.skipped || 0);
       el('eq-error').textContent     = fmt.format(d.today?.error || 0);
       el('eq-optout').textContent    = fmt.format(d.today?.optout || 0);
@@ -1597,8 +1585,6 @@
       } else {
         el('kpi-whatsapp-sub').textContent = `${d.whatsapp?.sent || 0} envoyés · en attente de delivery`;
       }
-      el('kpi-denounced').textContent = fmt.format(d.counts?.denounced || 0);
-
       // ── Fail-closed
       const failClosedTotal = d.registrationsFailClosedTotal || 0;
       const failClosedBoot = d.registrationsFailClosed || 0;
@@ -1619,9 +1605,8 @@
 
       const sentAll = d.counts?.sent || 0;
       const cancelledAll = d.counts?.cancelled || 0;
-      const denouncedAll = d.counts?.denounced || 0;
       const optoutAll = d.counts?.optout || 0;
-      const decidedAll = sentAll + cancelledAll + denouncedAll + optoutAll;
+      const decidedAll = sentAll + cancelledAll + optoutAll;
       const proactivity = decidedAll > 0 ? Math.round((cancelledAll / decidedAll) * 1000) / 10 : null;
       el('kpi-proactivity').textContent = proactivity == null ? '—' : `${proactivity}%`;
       el('kpi-proactivity-sub').textContent = decidedAll > 0
