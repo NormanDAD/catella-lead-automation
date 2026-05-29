@@ -1594,6 +1594,7 @@ async function processPendingLead(entry) {
       // (Adlead met parfois à jour l'un sans l'autre selon le type d'action)
       const timestamps = [
         lead.last_interaction_at,
+        lead.updated_at,
         interest.last_interaction_at,
         interest.updated_at,
       ];
