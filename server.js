@@ -1452,6 +1452,20 @@ async function processPendingLead(entry) {
     //    qui renvoie le lead COMPLET (status, is_under_prescription, discard_reason).
     //    Indispensable pour le check robuste dénonciation/statut plus bas.
     const lead = await fetchLead(entry.leadId, { programId: entry.programId });
+
+    // L'endpoint programme ne retourne pas last_interaction_at (doc Adlead v1).
+    // L'endpoint tenant le retourne → on l'enrichit si absent pour fiabiliser
+    // la détection d'activité commerciale (check timestamps J+1).
+    if (!lead.last_interaction_at) {
+      try {
+        const tenantLead = await adleadGet(`/leads/${entry.leadId}`);
+        if (tenantLead?.last_interaction_at) {
+          lead.last_interaction_at = tenantLead.last_interaction_at;
+          console.log(`[process] lead ${entry.leadId} — last_interaction_at enrichi depuis endpoint tenant : ${tenantLead.last_interaction_at}`);
+        }
+      } catch (_e) { /* non bloquant */ }
+    }
+
     // Log exhaustif pour diagnostiquer quels champs Adlead met à jour lors d'actions commerciales
     const _diagLead = {
       status: lead?.status,
@@ -3790,6 +3804,84 @@ app.post('/webhook/adlead', (req, res) => {
 
   const { event } = req.body || {};
   console.log(`[webhook] Événement reçu: ${event}`);
+
+  // ── interest:status-updated — annulation temps réel ────────────────────────
+  // Adlead notifie dès qu'un commercial change le statut d'un interest.
+  // Si le statut devient actif (ongoing, discarded, etc.) ET qu'on a un lead
+  // en attente pour cet interest, on l'annule immédiatement sans attendre T+24h.
+  if (event === 'interest:status-updated') {
+    const data = req.body.data || {};
+    const interestId = data.id;
+    const newStatus = data.status;
+    const leadId = data.context?.lead_id;
+
+    const BLOCKING_STATUSES = new Set(['ongoing', 'to-follow', 'interested', 'negotiating', 'discarded', 'pending-purchaser', 'purchaser']);
+    if (!BLOCKING_STATUSES.has(newStatus)) {
+      console.log(`[webhook] interest:status-updated interest ${interestId} → statut "${newStatus}" non bloquant`);
+      return res.status(200).json({ message: `Statut "${newStatus}" non bloquant` });
+    }
+
+    const idx = pendingLeads.findIndex(l => String(l.interestId) === String(interestId));
+    if (idx === -1) {
+      console.log(`[webhook] interest:status-updated interest ${interestId} → aucun lead en attente`);
+      return res.status(200).json({ message: 'Aucun lead en attente pour cet interest' });
+    }
+
+    const entry = pendingLeads[idx];
+    pendingLeads.splice(idx, 1);
+    const reason = `Statut interest → "${newStatus}" détecté via webhook Adlead (temps réel)`;
+    processedLeads.push({
+      id: interestId,
+      interestId,
+      leadId: leadId || entry.leadId,
+      programId: entry.programId,
+      status: 'cancelled',
+      reason,
+      receivedAt: entry.receivedAt,
+      checkAt: entry.checkAt,
+      processedAt: new Date().toISOString(),
+      cancelledViaWebhook: true,
+    });
+    savePending();
+    saveProcessed();
+    console.log(`[webhook] interest ${interestId} lead ${leadId || entry.leadId} — ANNULÉ temps réel : ${reason}`);
+    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+      sendTelegramNotification(`✅ Lead ${leadId || entry.leadId} annulé en temps réel — commercial actif (statut → "${newStatus}")`).catch(() => {});
+    }
+    return res.status(200).json({ message: 'Lead annulé en temps réel', interestId, newStatus });
+  }
+
+  // ── interest:deleted — suppression du lead dans Adlead ───────────────────
+  if (event === 'interest:deleted') {
+    const data = req.body.data || {};
+    const interestId = data.id;
+    const leadId = data.context?.lead_id;
+
+    const idx = pendingLeads.findIndex(l => String(l.interestId) === String(interestId));
+    if (idx === -1) {
+      console.log(`[webhook] interest:deleted interest ${interestId} → aucun lead en attente`);
+      return res.status(200).json({ message: 'Aucun lead en attente pour cet interest' });
+    }
+
+    const entry = pendingLeads[idx];
+    pendingLeads.splice(idx, 1);
+    processedLeads.push({
+      id: interestId,
+      interestId,
+      leadId: leadId || entry.leadId,
+      programId: entry.programId,
+      status: 'cancelled',
+      reason: 'Interest supprimé dans Adlead (interest:deleted)',
+      receivedAt: entry.receivedAt,
+      checkAt: entry.checkAt,
+      processedAt: new Date().toISOString(),
+      cancelledViaWebhook: true,
+    });
+    savePending();
+    saveProcessed();
+    console.log(`[webhook] interest:deleted interest ${interestId} — lead annulé`);
+    return res.status(200).json({ message: 'Lead annulé (interest supprimé)', interestId });
+  }
 
   if (event !== 'interest:created') {
     return res.status(200).json({ message: 'Événement ignoré' });
