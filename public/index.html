@@ -1724,19 +1724,28 @@
   async function renderPriorityWA() {
     const container = el('priority-wa-list');
     try {
-      const res = await fetch('/api/dashboard/replies', { cache: 'no-store' });
+      const res = await fetch('/api/whatsapp/conversations', { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const replies = await res.json();
-      if (!replies || replies.length === 0) {
+      const convs = await res.json();
+      if (!convs || convs.length === 0) {
         container.innerHTML = '<div class="priority-empty">Aucune réponse en attente</div>';
         return;
       }
-      const items = replies.slice(0, 5).map(r => {
-        const name = esc(r.contactName || r.whatsappProfileName || r.phone || '—');
-        const phone = esc(r.phone || r.whatsappFrom || '');
-        const prog = esc(r.programName || ('Programme #' + (r.programId || '?')));
-        const msg = esc((r.lastMessage || r.whatsappBody || '').slice(0, 80));
-        const adUrl = r.programId && r.leadId ? adleadUrl(r.programId, r.leadId) : null;
+      // Trier par dernière réponse entrante, les plus récentes en premier
+      const sorted = convs
+        .filter(c => c.lastInboundAt)
+        .sort((a, b) => new Date(b.lastInboundAt) - new Date(a.lastInboundAt));
+      if (sorted.length === 0) {
+        container.innerHTML = '<div class="priority-empty">Aucune réponse en attente</div>';
+        return;
+      }
+      const items = sorted.slice(0, 5).map(c => {
+        const lastIn = c.messages.filter(m => m.direction === 'in').slice(-1)[0];
+        const name = esc(c.contactName || c.phone || '—');
+        const phone = esc(c.phone || '');
+        const prog = esc(c.programName || (c.programId ? 'Programme #' + c.programId : '—'));
+        const msg = esc((lastIn?.body || '').slice(0, 80));
+        const adUrl = c.programId && c.leadId ? adleadUrl(c.programId, c.leadId) : null;
         const adBtn = adUrl
           ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:3px 8px;">Adlead ↗</a>`
           : '';
