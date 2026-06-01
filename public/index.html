@@ -2262,7 +2262,7 @@
       const res = await fetch(view.source, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const all = await res.json();
-      const list = all.filter(view.filter).reverse(); // récents en premier
+      const list = all.filter(view.filter); // /api/leads retourne déjà récents en premier
       if (list.length === 0) {
         el('modal-body').innerHTML = '<div class="modal-empty">Aucun lead dans cette catégorie.</div>';
         return;
