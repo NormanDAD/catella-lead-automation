@@ -2530,6 +2530,47 @@ app.post('/api/scheduler/run', async (req, res) => {
 // Endpoint de test Telegram : envoie un message bidon pour valider le canal.
 // Usage : POST /api/test/telegram (body JSON optionnel : { text: "..." })
 // Réponse : { ok, telegram: <api response> } ou { ok: false, error: ... }.
+// POST /api/test/email-preview — envoie un email de test avec le template choisi
+// Body : { template: "j1"|"j3-day1"|"j3-day2"|"j3-day3"|"j15-day1"|"j15-day2"|"j15-day3", to?: "email", programName?: "...", salutation?: "..." }
+app.post('/api/test/email-preview', async (req, res) => {
+  const { template = 'j3-day1', to, programName = 'Esprit Montmartre', salutation = 'Monsieur Martin' } = req.body || {};
+  const dest = to || 'norman.dadon@catella.com';
+  const accroche = 'Au cœur de Montmartre, une résidence d\'exception alliant charme haussmannien et prestations contemporaines.';
+  let subject, html;
+  const mockContact = { title: 'mr', fullname: 'Pierre Martin' };
+  const sal = buildSalutation ? buildSalutation(mockContact) : salutation;
+  if (template === 'j1') {
+    const ctx = {
+      ville: 'Paris', programme: programName, promoteur: 'Promoteur Test',
+      salutation: sal,
+      brochureUrl: getBrochureUrl(programName),
+    };
+    subject = buildEmailSubject(ctx);
+    html = buildEmailBody(ctx, accroche);
+  } else if (template === 'j3-day1') {
+    ({ subject, html } = buildJ3MEmailDay1(sal, programName, accroche));
+  } else if (template === 'j3-day2') {
+    ({ subject, html } = buildJ3MEmailDay2Fallback(sal, programName, accroche));
+  } else if (template === 'j3-day3') {
+    ({ subject, html } = buildJ3MEmailDay3(sal, programName, accroche));
+  } else if (template === 'j15-day1') {
+    ({ subject, html } = buildJ15Day1Email(sal, programName, accroche));
+  } else if (template === 'j15-day2') {
+    ({ subject, html } = buildJ15Day2Fallback(sal, programName, accroche));
+  } else if (template === 'j15-day3') {
+    ({ subject, html } = buildJ15Day3Email(sal, programName, accroche));
+  } else {
+    return res.status(400).json({ error: `template inconnu: ${template}` });
+  }
+  subject = `[TEST ${template}] ${subject}`;
+  try {
+    await sendEmailViaPowerAutomate(dest, subject, html);
+    res.json({ ok: true, template, to: dest, subject });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/test/telegram', async (req, res) => {
   const text = (req.body && req.body.text) || `🧪 <b>Test Telegram</b> depuis lead-automation Railway\n\nSi tu vois ce message, le canal Telegram est OK.\n\n<i>Heure serveur : ${new Date().toISOString()}</i>`;
   try {
