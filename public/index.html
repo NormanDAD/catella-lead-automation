@@ -1415,12 +1415,9 @@
         <input id="brochures-token" type="password" placeholder="Admin token (ADMIN_UPLOAD_TOKEN)" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #e5e5ea;border-radius:6px;font-size:13px;background:#fff;color:#1d1d1f;" oninput="saveBrochureToken(this.value)" />
         <button onclick="loadBrochuresStatus()" style="padding:7px 14px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;">Charger le statut</button>
       </div>
-      <div id="brochures-drop" style="border:2px dashed #c7c7cc;border-radius:8px;padding:20px;text-align:center;color:var(--text-dim);font-size:13px;margin-bottom:12px;cursor:pointer;transition:border-color .15s;" ondragover="event.preventDefault();this.style.borderColor='#1a3a5c'" ondragleave="this.style.borderColor='#c7c7cc'" ondrop="handleBrochureDrop(event)" onclick="document.getElementById('brochures-file').click()">
-        Glisser-déposer des PDFs ici, ou cliquer pour sélectionner
-        <input id="brochures-file" type="file" multiple accept=".pdf" style="display:none;" onchange="handleBrochureFiles(this.files)" />
-      </div>
-      <div id="brochures-upload-status" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;min-height:16px;"></div>
-      <div id="brochures-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px;"></div>
+      <div id="brochures-upload-status" style="font-size:13px;color:var(--text-dim);margin-bottom:10px;min-height:16px;"></div>
+      <div id="brochures-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;"></div>
+      <input id="brochures-file-hidden" type="file" accept=".pdf" style="display:none;" />
     </div>
   </div>
 
@@ -2442,6 +2439,7 @@
   // ── Brochures ──────────────────────────────────────────────────────────────
 
   let _brochuresOpen = false;
+  let _brochuresList = [];
 
   function saveBrochureToken(v) {
     sessionStorage.setItem('brochure_token', v);
@@ -2466,50 +2464,67 @@
     try {
       const r = await fetch('/api/admin/brochures/status', { headers: { 'x-admin-token': token } });
       if (r.status === 401) { el('brochures-upload-status').textContent = '❌ Token invalide.'; return; }
-      const list = await r.json();
-      const present = list.filter(b => b.present).length;
-      el('brochures-count').textContent = `${present}/${list.length} uploadés`;
+      _brochuresList = await r.json();
+      renderBrochuresList();
       el('brochures-upload-status').textContent = '';
-      el('brochures-list').innerHTML = list.map(b => `
-        <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:${b.present ? '#e8f7ee' : '#fff0f0'};border-radius:6px;font-size:12px;">
-          <span style="font-size:14px;">${b.present ? '✅' : '❌'}</span>
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.name)}</div>
-            <div style="color:#6e6e73;font-size:11px;">${esc(b.slug)}</div>
-          </div>
-          ${b.present ? `<a href="/brochures/${esc(b.slug)}" target="_blank" style="font-size:11px;color:#0070f3;flex-shrink:0;">Voir ↗</a>` : ''}
-        </div>`).join('');
     } catch (e) {
       el('brochures-upload-status').textContent = '❌ Erreur: ' + e.message;
     }
   }
 
-  function handleBrochureDrop(ev) {
-    ev.preventDefault();
-    ev.currentTarget.style.borderColor = '#c7c7cc';
-    handleBrochureFiles(ev.dataTransfer.files);
+  function renderBrochuresList() {
+    const present = _brochuresList.filter(b => b.present).length;
+    el('brochures-count').textContent = `${present}/${_brochuresList.length} uploadés`;
+    el('brochures-list').innerHTML = _brochuresList.map((b, i) => `
+      <div id="brochure-row-${i}" style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:${b.present ? '#e8f7ee' : '#fff7f0'};border-radius:6px;font-size:12px;border:1px solid ${b.present ? '#c3e6cb' : '#ffe0cc'};">
+        <span style="font-size:14px;flex-shrink:0;">${b.present ? '✅' : '📂'}</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.name)}</div>
+          <div style="color:#6e6e73;font-size:11px;">${esc(b.slug)}</div>
+        </div>
+        ${b.present
+          ? `<a href="/brochures/${esc(b.slug)}" target="_blank" style="font-size:11px;color:#0070f3;flex-shrink:0;white-space:nowrap;">Voir ↗</a>`
+          : `<button onclick="pickBrochureFile(${i})" style="padding:4px 10px;background:#1a3a5c;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap;">Uploader</button>`
+        }
+      </div>`).join('');
   }
 
-  async function handleBrochureFiles(files) {
-    const token = el('brochures-token').value.trim();
-    if (!token) { el('brochures-upload-status').textContent = '⚠️ Entrez votre admin token avant d\'uploader.'; return; }
-    const pdfs = Array.from(files).filter(f => f.name.endsWith('.pdf'));
-    if (!pdfs.length) { el('brochures-upload-status').textContent = '⚠️ Aucun fichier PDF sélectionné.'; return; }
+  function pickBrochureFile(idx) {
+    const fileInput = el('brochures-file-hidden');
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      fileInput.value = '';
+      await uploadBrochureForRow(idx, file);
+    };
+    fileInput.click();
+  }
 
-    let ok = 0, fail = 0;
-    for (const file of pdfs) {
-      el('brochures-upload-status').textContent = `Upload ${file.name}…`;
-      try {
-        const r = await fetch(`/api/admin/upload-brochure?filename=${encodeURIComponent(file.name)}`, {
-          method: 'POST',
-          headers: { 'x-admin-token': token, 'Content-Type': 'application/octet-stream' },
-          body: file,
-        });
-        if (r.ok) ok++; else { fail++; console.warn('upload fail', file.name, r.status); }
-      } catch (e) { fail++; console.error(e); }
+  async function uploadBrochureForRow(idx, file) {
+    const token = el('brochures-token').value.trim();
+    const brochure = _brochuresList[idx];
+    const row = el(`brochure-row-${idx}`);
+    if (row) row.style.opacity = '0.5';
+    el('brochures-upload-status').textContent = `Upload "${brochure.slug}"…`;
+    try {
+      const r = await fetch(`/api/admin/upload-brochure?filename=${encodeURIComponent(brochure.slug)}`, {
+        method: 'POST',
+        headers: { 'x-admin-token': token, 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      if (r.ok) {
+        el('brochures-upload-status').textContent = `✅ "${brochure.name}" uploadé`;
+        _brochuresList[idx].present = true;
+        renderBrochuresList();
+      } else {
+        const txt = await r.text();
+        el('brochures-upload-status').textContent = `❌ Erreur ${r.status}: ${txt}`;
+        if (row) row.style.opacity = '1';
+      }
+    } catch (e) {
+      el('brochures-upload-status').textContent = `❌ Erreur réseau: ${e.message}`;
+      if (row) row.style.opacity = '1';
     }
-    el('brochures-upload-status').textContent = `✅ ${ok} uploadé(s)${fail ? ` · ❌ ${fail} erreur(s)` : ''}`;
-    await loadBrochuresStatus();
   }
 </script>
 </body>
