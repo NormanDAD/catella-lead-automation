@@ -2199,11 +2199,15 @@ app.get('/api/leads', (req, res) => {
   // matche le fallback "Programme #XXX", on remplace par le cache si dispo.
   // Sinon on laisse tel quel.
   const BAD = /^Programme #\d+$/;
-  const enriched = processedLeads.slice().reverse().map(r => {
+  const enriched = processedLeads.slice().map(r => {
     const needsResolve = !r.programName || BAD.test(r.programName);
-    if (!needsResolve) return r;
-    const cached = programNameCache.get(String(r.programId));
-    return cached ? { ...r, programName: cached } : r;
+    return needsResolve && programNameCache.get(String(r.programId))
+      ? { ...r, programName: programNameCache.get(String(r.programId)) }
+      : r;
+  }).sort((a, b) => {
+    const ta = new Date(a.processedAt || a.receivedAt || 0).getTime();
+    const tb = new Date(b.processedAt || b.receivedAt || 0).getTime();
+    return tb - ta; // décroissant — récents en premier
   });
   res.json(enriched);
 });
@@ -3175,7 +3179,7 @@ app.post('/api/admin/rebuild-wa-conversations', async (req, res) => {
     const fromRaw = String(msg.from || '').replace(/^whatsapp:/, '');
     const toRaw   = String(msg.to   || '').replace(/^whatsapp:/, '');
     const body    = String(msg.body || '').trim();
-    const time    = msg.date_sent || msg.date_created || new Date().toISOString();
+    const time    = new Date(msg.date_sent || msg.date_created || Date.now()).toISOString();
     const isInbound  = msg.direction === 'inbound';
     const isOutbound = msg.direction === 'outbound-api' || msg.direction === 'outbound-reply';
 
