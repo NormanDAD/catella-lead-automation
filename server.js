@@ -2144,8 +2144,9 @@ app.get('/api/health', (req, res) => {
     pending: pendingLeads.length,
     processed: processedLeads.length,
     processedDateRange: (() => {
-      const dates = processedLeads.map(r => r.processedAt || r.receivedAt).filter(Boolean).sort();
-      return { oldest: dates[0] || null, newest: dates[dates.length - 1] || null };
+      const ts = processedLeads.map(r => new Date(r.processedAt || r.receivedAt || 0).getTime()).filter(t => t > 0);
+      if (!ts.length) return { oldest: null, newest: null };
+      return { oldest: new Date(Math.min(...ts)).toISOString(), newest: new Date(Math.max(...ts)).toISOString() };
     })(),
     programmes: Object.keys(PROGRAMMES).length,
     config: {
