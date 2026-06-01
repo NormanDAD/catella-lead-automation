@@ -1872,6 +1872,7 @@
       }
       // Trier par heure d'envoi croissante
       today.sort((a, b) => new Date(a.processedAt) - new Date(b.processedAt));
+      const visited = getVisitedLeads();
       const items = today.map(r => {
         const hour = new Date(r.processedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
         const name = esc(r.contactName || r.email || '—');
@@ -1879,13 +1880,16 @@
         const tel  = r.whatsappTo ? esc(r.whatsappTo) : '';
         const telLink = tel ? `<a href="tel:${tel}" class="priority-tel" style="font-size:12px;">📞</a>` : '';
         const adUrl = r.programId && r.leadId ? adleadUrl(r.programId, r.leadId) : null;
+        const lid = r.leadId || r.id || '';
+        const isVisited = lid && visited.has(String(lid));
         const adBtn = adUrl
-          ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:2px 7px;">↗</a>`
+          ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:2px 7px;" onclick="markLeadVisited('${esc(String(lid))}')">↗</a>`
           : '';
-        return `<div class="day-item">
-          <div class="day-time">${hour}</div>
+        const bg = isVisited ? 'background:#e8f7ee;border-left:3px solid #25a244;' : '';
+        return `<div class="day-item" style="${bg}">
+          <div class="day-time" style="${isVisited ? 'color:#25a244;font-weight:600;' : ''}">${hour}</div>
           <div class="day-info">
-            <div class="day-name">${name}</div>
+            <div class="day-name" style="${isVisited ? 'color:#1d7a3a;' : ''}">${name}</div>
             <div class="day-prog">${prog}</div>
           </div>
           <div class="day-actions">${telLink}${adBtn}</div>
@@ -2467,6 +2471,33 @@
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // ── Leads visités (vert après clic ↗) ────────────────────────────────────
+
+  const VISITED_KEY = 'catella_visited_leads';
+
+  function getVisitedLeads() {
+    try { return new Set(JSON.parse(localStorage.getItem(VISITED_KEY) || '[]')); } catch { return new Set(); }
+  }
+
+  function markLeadVisited(leadId) {
+    if (!leadId) return;
+    const visited = getVisitedLeads();
+    visited.add(String(leadId));
+    try { localStorage.setItem(VISITED_KEY, JSON.stringify([...visited])); } catch {}
+    // Recolore immédiatement sans attendre le prochain refresh
+    document.querySelectorAll('.day-item').forEach(el => {
+      const btn = el.querySelector('a[onclick*="' + leadId + '"]');
+      if (btn) {
+        el.style.background = '#e8f7ee';
+        el.style.borderLeft = '3px solid #25a244';
+        const timeEl = el.querySelector('.day-time');
+        const nameEl = el.querySelector('.day-name');
+        if (timeEl) { timeEl.style.color = '#25a244'; timeEl.style.fontWeight = '600'; }
+        if (nameEl) nameEl.style.color = '#1d7a3a';
+      }
+    });
+  }
 
   // ── Résolution noms de programmes ─────────────────────────────────────────
 
