@@ -1401,6 +1401,29 @@
     </div>
   </div>
 
+  <!-- Brochures -->
+  <div class="panel" id="brochures-panel">
+    <div class="panel-header" style="cursor:pointer;" onclick="toggleBrochuresPanel()">
+      <div>
+        <div class="panel-title">Brochures PDF <span id="brochures-count" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:6px;"></span></div>
+        <div class="panel-subtitle">Gérer les PDFs servis aux prospects via le bouton de l'email J+1</div>
+      </div>
+      <span id="brochures-chevron" style="font-size:18px;color:var(--text-dim);transition:transform .2s;">▸</span>
+    </div>
+    <div id="brochures-body" style="display:none;padding:0 16px 16px;">
+      <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input id="brochures-token" type="password" placeholder="Admin token (ADMIN_UPLOAD_TOKEN)" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #e5e5ea;border-radius:6px;font-size:13px;background:#fff;color:#1d1d1f;" oninput="saveBrochureToken(this.value)" />
+        <button onclick="loadBrochuresStatus()" style="padding:7px 14px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;">Charger le statut</button>
+      </div>
+      <div id="brochures-drop" style="border:2px dashed #c7c7cc;border-radius:8px;padding:20px;text-align:center;color:var(--text-dim);font-size:13px;margin-bottom:12px;cursor:pointer;transition:border-color .15s;" ondragover="event.preventDefault();this.style.borderColor='#1a3a5c'" ondragleave="this.style.borderColor='#c7c7cc'" ondrop="handleBrochureDrop(event)" onclick="document.getElementById('brochures-file').click()">
+        Glisser-déposer des PDFs ici, ou cliquer pour sélectionner
+        <input id="brochures-file" type="file" multiple accept=".pdf" style="display:none;" onchange="handleBrochureFiles(this.files)" />
+      </div>
+      <div id="brochures-upload-status" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;min-height:16px;"></div>
+      <div id="brochures-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px;"></div>
+    </div>
+  </div>
+
   <!-- Feed -->
   <div class="panel">
     <div class="panel-header">
@@ -2415,6 +2438,79 @@
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // ── Brochures ──────────────────────────────────────────────────────────────
+
+  let _brochuresOpen = false;
+
+  function saveBrochureToken(v) {
+    sessionStorage.setItem('brochure_token', v);
+  }
+
+  function toggleBrochuresPanel() {
+    _brochuresOpen = !_brochuresOpen;
+    el('brochures-body').style.display = _brochuresOpen ? 'block' : 'none';
+    el('brochures-chevron').style.transform = _brochuresOpen ? 'rotate(90deg)' : '';
+    if (_brochuresOpen) {
+      const saved = sessionStorage.getItem('brochure_token') || '';
+      el('brochures-token').value = saved;
+      if (saved) loadBrochuresStatus();
+    }
+  }
+
+  async function loadBrochuresStatus() {
+    const token = el('brochures-token').value.trim();
+    if (!token) { el('brochures-upload-status').textContent = '⚠️ Entrez votre admin token.'; return; }
+    sessionStorage.setItem('brochure_token', token);
+    el('brochures-upload-status').textContent = 'Chargement…';
+    try {
+      const r = await fetch('/api/admin/brochures/status', { headers: { 'x-admin-token': token } });
+      if (r.status === 401) { el('brochures-upload-status').textContent = '❌ Token invalide.'; return; }
+      const list = await r.json();
+      const present = list.filter(b => b.present).length;
+      el('brochures-count').textContent = `${present}/${list.length} uploadés`;
+      el('brochures-upload-status').textContent = '';
+      el('brochures-list').innerHTML = list.map(b => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:${b.present ? '#e8f7ee' : '#fff0f0'};border-radius:6px;font-size:12px;">
+          <span style="font-size:14px;">${b.present ? '✅' : '❌'}</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.name)}</div>
+            <div style="color:#6e6e73;font-size:11px;">${esc(b.slug)}</div>
+          </div>
+          ${b.present ? `<a href="/brochures/${esc(b.slug)}" target="_blank" style="font-size:11px;color:#0070f3;flex-shrink:0;">Voir ↗</a>` : ''}
+        </div>`).join('');
+    } catch (e) {
+      el('brochures-upload-status').textContent = '❌ Erreur: ' + e.message;
+    }
+  }
+
+  function handleBrochureDrop(ev) {
+    ev.preventDefault();
+    ev.currentTarget.style.borderColor = '#c7c7cc';
+    handleBrochureFiles(ev.dataTransfer.files);
+  }
+
+  async function handleBrochureFiles(files) {
+    const token = el('brochures-token').value.trim();
+    if (!token) { el('brochures-upload-status').textContent = '⚠️ Entrez votre admin token avant d\'uploader.'; return; }
+    const pdfs = Array.from(files).filter(f => f.name.endsWith('.pdf'));
+    if (!pdfs.length) { el('brochures-upload-status').textContent = '⚠️ Aucun fichier PDF sélectionné.'; return; }
+
+    let ok = 0, fail = 0;
+    for (const file of pdfs) {
+      el('brochures-upload-status').textContent = `Upload ${file.name}…`;
+      try {
+        const r = await fetch(`/api/admin/upload-brochure?filename=${encodeURIComponent(file.name)}`, {
+          method: 'POST',
+          headers: { 'x-admin-token': token, 'Content-Type': 'application/octet-stream' },
+          body: file,
+        });
+        if (r.ok) ok++; else { fail++; console.warn('upload fail', file.name, r.status); }
+      } catch (e) { fail++; console.error(e); }
+    }
+    el('brochures-upload-status').textContent = `✅ ${ok} uploadé(s)${fail ? ` · ❌ ${fail} erreur(s)` : ''}`;
+    await loadBrochuresStatus();
+  }
 </script>
 </body>
 </html>

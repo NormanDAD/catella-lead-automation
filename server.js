@@ -576,6 +576,20 @@ app.delete('/api/admin/brochures', (req, res) => {
   }
 });
 
+// GET /api/admin/brochures/status — liste les brochures de brochures.json avec présence sur disque
+app.get('/api/admin/brochures/status', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const result = Object.entries(BROCHURES).map(([name, slug]) => ({
+    name,
+    slug,
+    present: fs.existsSync(path.join(BROCHURES_DIR, slug)),
+  }));
+  res.json(result);
+});
+
 // POST /api/admin/upload-brochure?filename=slug.pdf
 // Corps : application/octet-stream (le PDF brut). Auth : x-admin-token.
 app.post('/api/admin/upload-brochure', (req, res) => {
