@@ -1408,6 +1408,10 @@
           <div class="panel-title">Top programmes</div>
           <div class="panel-subtitle">Leads traités par programme</div>
         </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <button onclick="resolveAndBackfillPrograms()" id="btn-resolve-programs" style="padding:4px 10px;background:#f0f0f2;border:none;border-radius:5px;cursor:pointer;font-size:11px;color:#1d1d1f;white-space:nowrap;">Résoudre noms</button>
+          <span id="resolve-programs-status" style="font-size:11px;color:var(--text-dim);"></span>
+        </div>
       </div>
       <div class="prog-list" id="prog-list">
         <div style="color: var(--text-dim); font-size: 13px;">Chargement…</div>
@@ -2459,6 +2463,30 @@
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // ── Résolution noms de programmes ─────────────────────────────────────────
+
+  async function resolveAndBackfillPrograms() {
+    const btn = el('btn-resolve-programs');
+    const status = el('resolve-programs-status');
+    btn.disabled = true;
+    status.textContent = 'Résolution via Adlead…';
+    try {
+      const r1 = await fetch('/api/admin/resolve-program-names', { method: 'POST' });
+      const d1 = await r1.json();
+      if (!r1.ok) { status.textContent = '❌ ' + (d1.error || r1.status); btn.disabled = false; return; }
+      status.textContent = `${d1.resolved} résolus, backfill…`;
+      const r2 = await fetch('/api/admin/backfill-program-names', { method: 'POST' });
+      const d2 = await r2.json();
+      if (!r2.ok) { status.textContent = '❌ ' + (d2.error || r2.status); btn.disabled = false; return; }
+      status.textContent = `✅ ${d1.resolved} noms résolus · ${d2.updated} leads mis à jour`;
+      btn.disabled = false;
+      setTimeout(() => refresh(), 1000);
+    } catch (e) {
+      status.textContent = '❌ ' + e.message;
+      btn.disabled = false;
+    }
+  }
 
   // ── Test email preview ────────────────────────────────────────────────────
 
