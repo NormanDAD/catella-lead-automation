@@ -1132,9 +1132,14 @@ function splitName(fullname) {
 }
 
 function buildSalutation(contact) {
-  const { firstname, lastname } = splitName(contact.fullname || contact.display_name || '');
-  const rawTitle = (contact.title || '').trim().toLowerCase();
-  const title = rawTitle === 'mr' ? 'Monsieur' : rawTitle === 'ms' ? 'Madame' : rawTitle;
+  const parsed = splitName(contact.fullname || contact.display_name || '');
+  const lastname = contact.name || parsed.lastname || '';
+  const firstname = contact.firstname || parsed.firstname || '';
+  const rawTitle = (contact.title_display || contact.title || '').trim().toLowerCase();
+  let title = '';
+  if (['mr', 'm', 'm.', 'monsieur'].includes(rawTitle)) title = 'Monsieur';
+  else if (['ms', 'mme', 'mme.', 'madame', 'mrs', 'miss'].includes(rawTitle)) title = 'Madame';
+  else if (rawTitle) title = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
   if (title && lastname) return `${title} ${lastname}`;
   if (title && firstname) return `${title} ${firstname}`;
   if (title) return title;
