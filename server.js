@@ -518,6 +518,11 @@ app.use((req, res, next) => {
     setDashboardCookie(res); // renouvelle la session à chaque visite
     return next();
   }
+  // Requêtes admin avec x-admin-token → laisse passer (requireAdmin vérifiera le token ensuite)
+  const adminToken = req.headers['x-admin-token'] || req.query._token || '';
+  if (adminToken && CONFIG.ADMIN_UPLOAD_TOKEN && adminToken === CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return next();
+  }
   // API calls → 401 JSON. Navigation → redirect login.
   if (req.path.startsWith('/api/')) {
     return res.status(401).json({ error: 'Non authentifié' });
