@@ -2143,6 +2143,10 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     pending: pendingLeads.length,
     processed: processedLeads.length,
+    processedDateRange: (() => {
+      const dates = processedLeads.map(r => r.processedAt || r.receivedAt).filter(Boolean).sort();
+      return { oldest: dates[0] || null, newest: dates[dates.length - 1] || null };
+    })(),
     programmes: Object.keys(PROGRAMMES).length,
     config: {
       delayHours: CONFIG.DELAY_HOURS,
