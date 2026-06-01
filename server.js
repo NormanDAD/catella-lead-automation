@@ -5641,3 +5641,70 @@ async function backupProcessed() {
 setTimeout(() => backupProcessed().catch(() => {}), 10 * 1000);
 // Puis toutes les 24h
 setInterval(() => backupProcessed().catch(() => {}), 24 * 60 * 60 * 1000);
+
+// ─── RÉCAP QUOTIDIEN RÉPONSES WHATSAPP ──────────────────────────────────────
+// Chaque matin à 9h Paris : Telegram avec les conversations WA en attente
+// de réponse (prospect a répondu mais Norman n'a pas encore répondu).
+// Rappelle aussi combien de conversations sont actives au total.
+
+let waRecapLastRun = null;
+
+async function waConversationsDailyCron() {
+  if (!CONFIG.TELEGRAM_NOTIF_ENABLED || !CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) return;
+  const nowParis = new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
+  const [h, m] = nowParis.split(':').map(Number);
+  if (h !== 9 || m > 4) return; // fenêtre 9h00-9h04
+  const todayKey = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' });
+  if (waRecapLastRun === todayKey) return;
+  waRecapLastRun = todayKey;
+
+  // Reconstruit les conversations depuis processedLeads
+  const convMap = {};
+  for (const l of processedLeads) {
+    let phone = null, direction = null;
+    if (l.status === 'sent' && l.whatsappSid && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
+    else if (l.status === 'whatsapp_reply_received' && l.whatsappFrom) { phone = l.whatsappFrom; direction = 'in'; }
+    else if (l.status === 'whatsapp_reply_sent' && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
+    if (!phone) continue;
+    if (!convMap[phone]) convMap[phone] = { phone, contactName: null, programName: null, messages: [] };
+    const c = convMap[phone];
+    if (l.contactName && !c.contactName) c.contactName = l.contactName;
+    if (l.programName && !c.programName) c.programName = l.programName;
+    c.messages.push({ direction, time: l.processedAt || l.receivedAt });
+  }
+
+  // Conversations avec réponse prospect non traitée :
+  // dernière message = entrant (in) sans réponse sortante (out) après
+  const pending = [];
+  for (const c of Object.values(convMap)) {
+    const sorted = c.messages.slice().sort((a, b) => new Date(a.time) - new Date(b.time));
+    const lastMsg = sorted[sorted.length - 1];
+    if (lastMsg && lastMsg.direction === 'in') {
+      pending.push({ ...c, lastReplyAt: lastMsg.time });
+    }
+  }
+  pending.sort((a, b) => new Date(a.lastReplyAt) - new Date(b.lastReplyAt)); // plus anciennes en premier
+
+  const totalConvs = Object.values(convMap).filter(c => c.messages.some(m => m.direction === 'in')).length;
+
+  let txt = `📱 *Récap WA quotidien — ${todayKey}*\n`;
+  txt += `${totalConvs} conversation${totalConvs !== 1 ? 's' : ''} actives`;
+  if (pending.length === 0) {
+    txt += ` — ✅ tout est traité`;
+  } else {
+    txt += ` — ⚠️ *${pending.length} en attente de réponse*\n\n`;
+    for (const c of pending.slice(0, 10)) {
+      const name = c.contactName || c.phone;
+      const prog = c.programName || '—';
+      const age = Math.round((Date.now() - new Date(c.lastReplyAt).getTime()) / (1000 * 60 * 60));
+      txt += `• ${name} (${prog}) — il y a ${age}h\n`;
+    }
+    if (pending.length > 10) txt += `… et ${pending.length - 10} autres`;
+  }
+
+  await sendTelegramNotification(txt, { parse_mode: 'Markdown' }).catch(e =>
+    console.error('[wa-recap] Telegram erreur:', e.message)
+  );
+  console.log(`[wa-recap] récap envoyé — ${totalConvs} convs, ${pending.length} en attente`);
+}
+setInterval(() => waConversationsDailyCron().catch(e => console.error('[wa-recap] erreur:', e.message)), 5 * 60 * 1000);
