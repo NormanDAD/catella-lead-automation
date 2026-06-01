@@ -1411,9 +1411,19 @@
       <span id="brochures-chevron" style="font-size:18px;color:var(--text-dim);transition:transform .2s;">▸</span>
     </div>
     <div id="brochures-body" style="display:none;padding:0 16px 16px;">
-      <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <input id="brochures-token" type="password" placeholder="Admin token (ADMIN_UPLOAD_TOKEN)" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #e5e5ea;border-radius:6px;font-size:13px;background:#fff;color:#1d1d1f;" oninput="saveBrochureToken(this.value)" />
         <button onclick="loadBrochuresStatus()" style="padding:7px 14px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;">Charger le statut</button>
+      </div>
+      <div id="disk-usage-bar" style="display:none;margin-bottom:12px;padding:10px 14px;background:#fff7e6;border:1px solid #ffd580;border-radius:8px;font-size:13px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+          <div id="disk-usage-text" style="font-weight:600;color:#7d4a00;"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button onclick="purgerBrochures()" style="padding:5px 12px;background:#c0392b;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">Purger brochures</button>
+            <button onclick="trimProcessed()" style="padding:5px 12px;background:#e67e22;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">Archiver anciens leads</button>
+          </div>
+        </div>
+        <div id="disk-usage-detail" style="margin-top:6px;font-size:12px;color:#6e6e73;"></div>
       </div>
       <div id="brochures-upload-status" style="font-size:13px;color:var(--text-dim);margin-bottom:10px;min-height:16px;"></div>
       <div id="brochures-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;"></div>
@@ -2462,14 +2472,53 @@
     sessionStorage.setItem('brochure_token', token);
     el('brochures-upload-status').textContent = 'Chargement…';
     try {
-      const r = await fetch('/api/admin/brochures/status', { headers: { 'x-admin-token': token } });
-      if (r.status === 401) { el('brochures-upload-status').textContent = '❌ Token invalide.'; return; }
-      _brochuresList = await r.json();
+      const [rStatus, rDisk] = await Promise.all([
+        fetch('/api/admin/brochures/status', { headers: { 'x-admin-token': token } }),
+        fetch('/api/admin/disk-usage',        { headers: { 'x-admin-token': token } }),
+      ]);
+      if (rStatus.status === 401) { el('brochures-upload-status').textContent = '❌ Token invalide.'; return; }
+      _brochuresList = await rStatus.json();
       renderBrochuresList();
+      if (rDisk.ok) {
+        const d = await rDisk.json();
+        const usedMb = +(d.totalMb - d.freeMb).toFixed(1);
+        const pct = d.totalMb > 0 ? Math.round(usedMb / d.totalMb * 100) : 0;
+        const bar = el('disk-usage-bar');
+        bar.style.display = 'block';
+        bar.style.background = d.freeMb < 80 ? '#fff0f0' : '#fff7e6';
+        bar.style.borderColor = d.freeMb < 80 ? '#e5a0a0' : '#ffd580';
+        el('disk-usage-text').textContent = `Volume Railway : ${d.freeMb} MB libres / ${d.totalMb} MB total (${pct}% utilisé)`;
+        el('disk-usage-text').style.color = d.freeMb < 80 ? '#c0392b' : '#7d4a00';
+        el('disk-usage-detail').textContent = d.files.map(f => `${f.file} ${f.sizeMb} MB`).join(' · ') + ` · brochures ${d.brochuresMb} MB`;
+      }
       el('brochures-upload-status').textContent = '';
     } catch (e) {
       el('brochures-upload-status').textContent = '❌ Erreur: ' + e.message;
     }
+  }
+
+  async function purgerBrochures() {
+    if (!confirm('Supprimer tous les PDFs du serveur Railway ? Les liens brochures ne fonctionneront plus jusqu\'à un nouvel upload.')) return;
+    const token = el('brochures-token').value.trim();
+    el('brochures-upload-status').textContent = 'Suppression en cours…';
+    try {
+      const r = await fetch('/api/admin/brochures', { method: 'DELETE', headers: { 'x-admin-token': token } });
+      const d = await r.json();
+      el('brochures-upload-status').textContent = `✅ ${d.deleted} brochure(s) supprimée(s)`;
+      await loadBrochuresStatus();
+    } catch (e) { el('brochures-upload-status').textContent = '❌ ' + e.message; }
+  }
+
+  async function trimProcessed() {
+    if (!confirm('Archiver les anciens leads traités ? Les 500 plus récents seront conservés, le reste supprimé du fichier local. Les données restent visibles dans le dashboard pendant cette session.')) return;
+    const token = el('brochures-token').value.trim();
+    el('brochures-upload-status').textContent = 'Archivage en cours…';
+    try {
+      const r = await fetch('/api/admin/trim-processed?keep=500', { method: 'POST', headers: { 'x-admin-token': token } });
+      const d = await r.json();
+      el('brochures-upload-status').textContent = `✅ ${d.removed} entrées supprimées — ${d.after} conservées`;
+      await loadBrochuresStatus();
+    } catch (e) { el('brochures-upload-status').textContent = '❌ ' + e.message; }
   }
 
   function renderBrochuresList() {

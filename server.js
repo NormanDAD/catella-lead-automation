@@ -576,6 +576,48 @@ app.delete('/api/admin/brochures', (req, res) => {
   }
 });
 
+// GET /api/admin/disk-usage — taille des fichiers data + espace libre volume
+app.get('/api/admin/disk-usage', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const stat = fs.statfsSync(DATA_DIR);
+    const freeMb  = (stat.bfree  * stat.bsize) / (1024 * 1024);
+    const totalMb = (stat.blocks * stat.bsize) / (1024 * 1024);
+    const files = ['pending_leads.json', 'processed_leads.json', 'program_name_cache.json', 'graph_token_cache.json'].map(f => {
+      const fp = path.join(DATA_DIR, f);
+      const size = fs.existsSync(fp) ? fs.statSync(fp).size : 0;
+      return { file: f, sizeMb: +(size / (1024 * 1024)).toFixed(2) };
+    });
+    let brochuresMb = 0;
+    if (fs.existsSync(BROCHURES_DIR)) {
+      for (const f of fs.readdirSync(BROCHURES_DIR)) {
+        try { brochuresMb += fs.statSync(path.join(BROCHURES_DIR, f)).size; } catch (_) {}
+      }
+      brochuresMb = +(brochuresMb / (1024 * 1024)).toFixed(2);
+    }
+    res.json({ freeMb: +freeMb.toFixed(1), totalMb: +totalMb.toFixed(1), files, brochuresMb });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/trim-processed?keep=N — conserve les N dernières entrées de processed_leads.json
+app.post('/api/admin/trim-processed', (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const keep = Math.max(100, parseInt(req.query.keep || '500', 10));
+  const before = processedLeads.length;
+  if (before <= keep) return res.json({ ok: true, before, after: before, removed: 0 });
+  processedLeads.splice(0, before - keep);
+  saveProcessed();
+  res.json({ ok: true, before, after: processedLeads.length, removed: before - processedLeads.length });
+});
+
 // GET /api/admin/brochures/status — liste les brochures de brochures.json avec présence sur disque
 app.get('/api/admin/brochures/status', (req, res) => {
   const token = req.headers['x-admin-token'] || '';
