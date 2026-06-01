@@ -5708,3 +5708,64 @@ async function waConversationsDailyCron() {
   console.log(`[wa-recap] récap envoyé — ${totalConvs} convs, ${pending.length} en attente`);
 }
 setInterval(() => waConversationsDailyCron().catch(e => console.error('[wa-recap] erreur:', e.message)), 5 * 60 * 1000);
+
+// ─── ALERTE FENÊTRE WA SUR LE POINT D'EXPIRER ───────────────────────────────
+// Toutes les 5 min : détecte les conversations où le prospect a répondu
+// il y a 20h (fenêtre de 24h Meta → expire dans ~4h) sans réponse de Norman.
+// Envoie une alerte WhatsApp + Telegram sur son numéro perso.
+
+const waWindowAlertSent = new Set(); // clé = phone+date pour éviter les répétitions
+
+async function waWindowExpiryAlert() {
+  if (!CONFIG.WHATSAPP_ENABLED && !CONFIG.TELEGRAM_NOTIF_ENABLED) return;
+
+  const now = Date.now();
+  const H20 = 20 * 60 * 60 * 1000; // 20h = fenêtre à 4h de fermeture
+  const H24 = 24 * 60 * 60 * 1000;
+
+  // Reconstitue les conversations
+  const convMap = {};
+  for (const l of processedLeads) {
+    let phone = null, direction = null;
+    if (l.status === 'sent' && l.whatsappSid && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
+    else if (l.status === 'whatsapp_reply_received' && l.whatsappFrom) { phone = l.whatsappFrom; direction = 'in'; }
+    else if (l.status === 'whatsapp_reply_sent' && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
+    if (!phone) continue;
+    if (!convMap[phone]) convMap[phone] = { phone, contactName: null, programName: null, messages: [] };
+    const c = convMap[phone];
+    if (l.contactName && !c.contactName) c.contactName = l.contactName;
+    if (l.programName && !c.programName) c.programName = l.programName;
+    c.messages.push({ direction, time: l.processedAt || l.receivedAt || '' });
+  }
+
+  for (const c of Object.values(convMap)) {
+    const sorted = c.messages.slice().sort((a, b) => new Date(a.time) - new Date(b.time));
+    const lastMsg = sorted[sorted.length - 1];
+    if (!lastMsg || lastMsg.direction !== 'in') continue; // pas de réponse prospect en attente
+
+    const lastInAt = new Date(lastMsg.time).getTime();
+    if (isNaN(lastInAt)) continue;
+    const age = now - lastInAt;
+    if (age < H20 || age >= H24) continue; // pas encore à 20h, ou déjà expirée
+
+    // Alerte à envoyer — dédoublonnage : une seule alerte par conv par heure
+    const alertKey = `${c.phone}-${Math.floor(age / (60 * 60 * 1000))}`;
+    if (waWindowAlertSent.has(alertKey)) continue;
+    waWindowAlertSent.add(alertKey);
+
+    const name = c.contactName || c.phone;
+    const prog = c.programName || '—';
+    const remaining = Math.round((H24 - age) / (60 * 60 * 1000));
+    const msg = `⏰ Fenêtre WA expire dans ${remaining}h\n${name} (${prog})\nRéponds avant fermeture !`;
+
+    if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
+      sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, msg)
+        .catch(e => console.error('[wa-expiry] WA erreur:', e.message));
+    }
+    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
+      sendTelegramNotification(msg).catch(e => console.error('[wa-expiry] Telegram erreur:', e.message));
+    }
+    console.log(`[wa-expiry] alerte envoyée — ${name} (${prog}), fenêtre expire dans ${remaining}h`);
+  }
+}
+setInterval(() => waWindowExpiryAlert().catch(e => console.error('[wa-expiry] erreur:', e.message)), 5 * 60 * 1000);
