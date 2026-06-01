@@ -462,8 +462,10 @@ function saveProcessed() { saveJsonFile(PROCESSED_FILE, processedLeads); }
 // ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
-// Middleware admin : tous les endpoints /api/admin/* et /api/test/* et /api/scheduler/* requièrent ADMIN_UPLOAD_TOKEN
+// Middleware admin : tous les endpoints /api/admin/* et /api/test/* et /api/scheduler/* requièrent
+// soit x-admin-token (curl/API), soit une session dashboard valide (navigateur connecté).
 function requireAdmin(req, res, next) {
+  if (isDashboardAuthenticated(req)) return next();
   const token = req.headers['x-admin-token'] || req.query._token || '';
   if (!CONFIG.ADMIN_UPLOAD_TOKEN) return res.status(503).json({ error: 'ADMIN_UPLOAD_TOKEN non configuré' });
   if (token !== CONFIG.ADMIN_UPLOAD_TOKEN) return res.status(401).json({ error: 'Token admin requis' });

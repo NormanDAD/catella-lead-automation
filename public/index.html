@@ -1341,6 +1341,13 @@
           <div class="run-report-summary" id="j3m-run-summary"></div>
           <div class="run-report-reasons" id="j3m-run-reasons"></div>
         </div>
+        <div style="padding:10px 14px 4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;border-top:1px solid #f0f0f2;">
+          <span style="font-size:11px;color:var(--text-dim);flex-shrink:0;">Test email →</span>
+          <button onclick="sendEmailPreview('j3-day1')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 1</button>
+          <button onclick="sendEmailPreview('j3-day2')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 2</button>
+          <button onclick="sendEmailPreview('j3-day3')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 3</button>
+          <span id="j3m-preview-status" style="font-size:11px;color:var(--text-dim);"></span>
+        </div>
       </div>
 
       <!-- J+15 -->
@@ -1371,6 +1378,13 @@
           <div class="run-report-title">Rapport dernière exéc.</div>
           <div class="run-report-summary" id="j15-run-summary"></div>
           <div class="run-report-reasons" id="j15-run-reasons"></div>
+        </div>
+        <div style="padding:10px 14px 4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;border-top:1px solid #f0f0f2;">
+          <span style="font-size:11px;color:var(--text-dim);flex-shrink:0;">Test email →</span>
+          <button onclick="sendEmailPreview('j15-day1')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 1</button>
+          <button onclick="sendEmailPreview('j15-day2')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 2</button>
+          <button onclick="sendEmailPreview('j15-day3')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 3</button>
+          <span id="j15-preview-status" style="font-size:11px;color:var(--text-dim);"></span>
         </div>
       </div>
 
@@ -2445,6 +2459,30 @@
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // ── Test email preview ────────────────────────────────────────────────────
+
+  async function sendEmailPreview(template) {
+    const statusId = template.startsWith('j3') ? 'j3m-preview-status' : 'j15-preview-status';
+    const statusEl = el(statusId);
+    statusEl.textContent = 'Envoi…';
+    try {
+      const r = await fetch('/api/test/email-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template, programName: 'Esprit Montmartre' }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        statusEl.textContent = '✅ Envoyé sur norman.dadon@catella.com';
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+      } else {
+        statusEl.textContent = '❌ ' + (d.error || r.status);
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
 
   // ── Brochures ──────────────────────────────────────────────────────────────
 
