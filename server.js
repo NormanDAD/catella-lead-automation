@@ -1070,10 +1070,11 @@ function splitName(fullname) {
 
 function buildSalutation(contact) {
   const { firstname, lastname } = splitName(contact.fullname || contact.display_name || '');
-  const title = (contact.title || '').trim();
+  const rawTitle = (contact.title || '').trim().toLowerCase();
+  const title = rawTitle === 'mr' ? 'Monsieur' : rawTitle === 'ms' ? 'Madame' : rawTitle;
   if (title && lastname) return `${title} ${lastname}`;
-  if (lastname) return lastname;
-  if (firstname) return firstname;
+  if (title && firstname) return `${title} ${firstname}`;
+  if (title) return title;
   return 'Madame, Monsieur';
 }
 
@@ -4441,10 +4442,8 @@ function buildJ15Day1Email(salutation, programName, accroche) {
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Avant de classer définitivement votre dossier, je souhaitais m'assurer qu'on ne passait pas à côté d'une opportunité pour vous. Le programme évolue toujours et il reste actuellement des biens disponibles.</p>
 <p>Un mot de vous suffit pour que je vous transmette les éléments à jour.</p>
-<p>Très cordialement,<br/>
-Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+<p>Très cordialement,</p>
+${buildFullSignature()}`;
   return { subject, html };
 }
 
@@ -4455,9 +4454,7 @@ function buildJ15Day2Fallback(salutation, programName, accroche) {
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Notre stock évolue rapidement, et les meilleures opportunités partent vite. Si votre projet reste d'actualité, je peux vous transmettre les disponibilités à jour aujourd'hui.</p>
 <p>Souhaitez-vous que je vous rappelle ?</p>
-<p>Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+${buildFullSignature()}`;
   return { subject, html };
 }
 
@@ -4468,10 +4465,8 @@ function buildJ15Day3Email(salutation, programName, accroche) {
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
 <p>Si votre projet immobilier évolue dans les semaines à venir et que vous souhaitez revoir ce programme ou d'autres opportunités de notre portefeuille, n'hésitez pas à me recontacter directement à cette adresse.</p>
 <p>Je vous souhaite une bonne continuation dans vos recherches.</p>
-<p>Cordialement,<br/>
-Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+<p>Cordialement,</p>
+${buildFullSignature()}`;
   return { subject, html };
 }
 
@@ -4827,17 +4822,29 @@ function isJ3MCandidate(record, now) {
   return false;
 }
 
+function buildFullSignature() {
+  return `<p style="margin-top: 24px; font-size: 13px; line-height: 1.5;">
+<strong>Norman DADON</strong><br>
+Directeur des ventes<br>
+<strong>Catella Residential</strong><br>
+4 rue de Lasteyrie<br>
+75116 Paris<br>
+<span style="color:#888;">-----------------------------------------------------------------</span><br>
+Tel: +33 (0)1 56 79 79 79<br>
+Mobile: +33 (0)6 64 58 24 11<br>
+E-mail: <a href="mailto:Norman.Dadon@catella.fr">Norman.Dadon@catella.fr</a><br>
+Web: <a href="https://www.catellaresidential.fr">www.catellaresidential.fr</a> | <a href="https://www.catella.com">www.catella.com</a>
+</p>`;
+}
+
 function buildJ3MEmailDay1(salutation, programName, accroche) {
   const subject = `Petit point sur votre demande ${programName}`;
   const html = `<p>Bonjour ${salutation},</p>
 <p>Petit point rapide concernant votre demande pour ${programName}. Je n'ai pas encore eu votre retour suite à mes premiers messages, et je préférais m'assurer que vous les avez bien reçus.</p>
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
-<p>Avez-vous quelques minutes pour qu'on échange brièvement de votre projet ? Vous pouvez réserver un créneau directement ici :<br/>
-<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
-<p>Au plaisir d'échanger,<br/>
-Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+<p>Avez-vous quelques minutes pour qu'on échange brièvement de votre projet ? Répondez directement à ce mail, je vous rappelle dans la journée.</p>
+<p>Au plaisir d'échanger,</p>
+${buildFullSignature()}`;
   return { subject, html };
 }
 
@@ -4846,12 +4853,8 @@ function buildJ3MEmailDay2Fallback(salutation, programName, accroche) {
   const html = `<p>Bonjour ${salutation},</p>
 <p>Je reviens vers vous concernant votre demande sur ${programName}.</p>
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
-<p>Je viens de regarder le programme : nous avons encore des disponibilités. Si votre projet est toujours d'actualité, c'est le moment d'en discuter. N'hésitez pas à me donner vos critères d'acquisition.</p>
-<p>Ou discutons : avez-vous 10 minutes cette semaine ? Réservation directe ici :<br/>
-<a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></p>
-<p>Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+<p>Je viens de regarder le programme : nous avons encore des disponibilités. Si votre projet est toujours d'actualité, c'est le moment d'en discuter. N'hésitez pas à me donner vos critères d'acquisition en réponse à ce mail.</p>
+${buildFullSignature()}`;
   return { subject, html };
 }
 
@@ -4860,15 +4863,9 @@ function buildJ3MEmailDay3(salutation, programName, accroche) {
   const html = `<p>Bonjour ${salutation},</p>
 <p>Dernier message de ma part concernant ${programName}.</p>
 ${accroche ? `<p><em>${escapeHtml(accroche)}</em></p>` : ''}
-<p>Sans nouvelles, je vais classer votre dossier en fin de semaine. Si votre projet immobilier est toujours d'actualité, c'est vraiment le moment de me le faire savoir.</p>
-<ul>
-<li>Réservez un créneau ici pour qu'on échange : <a href="${CONFIG.BOOKING_URL}">${CONFIG.BOOKING_URL}</a></li>
-<li>Ou répondez directement à ce mail avec vos critères, je vous envoie immédiatement les plans et les prix disponibles.</li>
-</ul>
-<p>Je reste à votre disposition,<br/>
-Norman DADON<br/>
-—<br/>
-Catella Residential — Logement neuf</p>`;
+<p>Sans nouvelles, je vais classer votre dossier en fin de semaine. Si votre projet immobilier est toujours d'actualité, c'est vraiment le moment de me le faire savoir — répondez directement à ce mail avec vos critères, je vous envoie immédiatement les plans et les prix disponibles.</p>
+<p>Je reste à votre disposition,</p>
+${buildFullSignature()}`;
   return { subject, html };
 }
 
