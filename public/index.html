@@ -1934,6 +1934,7 @@
       const j3  = all.filter(r => (r.j3mRelances || 0) > 0);
       const j15 = all.filter(r => (r.j15Relances || 0) > 0);
 
+      const visited = getVisitedLeads();
       const renderList = (containerId, countId, items) => {
         el(countId).textContent = items.length;
         if (items.length === 0) {
@@ -1945,12 +1946,15 @@
           const prog = esc(r.programName || ('Programme #' + (r.programId || '?')));
           const ago  = timeAgo(r.processedAt);
           const adUrl = r.programId && r.leadId ? adleadUrl(r.programId, r.leadId) : null;
+          const lid  = r.leadId ? String(r.leadId) : null;
+          const isVisited = lid && visited.has(lid);
           const adBtn = adUrl
-            ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:3px 8px;" onclick="markLeadVisited('${esc(r.leadId)}')">↗</a>`
+            ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:3px 8px;" onclick="markLeadVisited('${esc(lid)}')">↗</a>`
             : '';
-          return `<div class="priority-item">
+          const bg = isVisited ? 'background:#e8f7ee;border-left:3px solid #25a244;' : '';
+          return `<div class="priority-item" style="${bg}">
             <div class="priority-info">
-              <div class="priority-name">${name}</div>
+              <div class="priority-name" style="${isVisited ? 'color:#1d7a3a;' : ''}">${name}</div>
               <div class="priority-prog">${prog} · ${ago}</div>
             </div>
             <div class="priority-actions">${adBtn}</div>
@@ -2598,13 +2602,13 @@
     visited.add(String(leadId));
     try { localStorage.setItem(VISITED_KEY, JSON.stringify([...visited])); } catch {}
     // Recolore immédiatement sans attendre le prochain refresh
-    document.querySelectorAll('.day-item').forEach(el => {
+    document.querySelectorAll('.day-item, .priority-item').forEach(el => {
       const btn = el.querySelector('a[onclick*="' + leadId + '"]');
       if (btn) {
         el.style.background = '#e8f7ee';
         el.style.borderLeft = '3px solid #25a244';
         const timeEl = el.querySelector('.day-time');
-        const nameEl = el.querySelector('.day-name');
+        const nameEl = el.querySelector('.day-name, .priority-name');
         if (timeEl) { timeEl.style.color = '#25a244'; timeEl.style.fontWeight = '600'; }
         if (nameEl) nameEl.style.color = '#1d7a3a';
       }
