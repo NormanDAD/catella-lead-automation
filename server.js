@@ -142,19 +142,6 @@ const CONFIG = {
   // Si vide, aucun StatusCallback n'est envoyé à l'envoi. Valeur prod :
   // https://lead-automation-production-33e8.up.railway.app/webhook/twilio-status
   TWILIO_STATUS_CALLBACK_URL: process.env.TWILIO_STATUS_CALLBACK_URL || '',
-  // ── Notifications Telegram (canal "urgent" Norman) ─────────────────────────
-  // Bot créé via @BotFather → @Catella_notif_bot. Token = TELEGRAM_BOT_TOKEN.
-  // Norman a démarré la conversation avec /start → son chat_id = TELEGRAM_CHAT_ID.
-  // Le bot poste des notifs courtes (HTML) à 2 occasions :
-  //   - Lead traité par le pipeline (sendInternalNotif) → "lead sent → action Adlead urgente"
-  //   - Réponse WhatsApp prospect (/webhook/whatsapp-incoming) → "réponse → action Adlead"
-  // Canal redondant avec mail Gmail + WhatsApp Twilio interne. But : ne JAMAIS rater une
-  // notif urgente, et garder une trace dans l'historique conversationnel Telegram.
-  // TELEGRAM_NOTIF_ENABLED=false pour kill switch global (idem que INTERNAL_NOTIF_DISABLED
-  // mais ciblé Telegram seulement, utile si on veut bypass Telegram tout en gardant mail).
-  TELEGRAM_BOT_TOKEN:      process.env.TELEGRAM_BOT_TOKEN || '',
-  TELEGRAM_CHAT_ID:        process.env.TELEGRAM_CHAT_ID || '',
-  TELEGRAM_NOTIF_ENABLED:  process.env.TELEGRAM_NOTIF_ENABLED !== 'false',
   // ── Tag Adlead "Relance J+1 envoyée" ─────────────────────────────────────
   // L'API Adlead /tags exige un UUID de tag pré-créé dans l'admin (côté
   // responsable marketing). Doc : https://docs.adlead.immo/v1/tags.html
@@ -312,9 +299,6 @@ function checkDiskSpace() {
       _diskAlertSent = true;
       const msg = `⚠️ ALERTE ESPACE DISQUE : volume Railway à ${freeMb.toFixed(0)} MB libres — risque ENOSPC imminent. Purger les brochures ou agrandir le volume.`;
       console.error('[persistence]', msg);
-      if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-        sendTelegramNotification(msg).catch(() => {});
-      }
     } else if (freeMb >= 80) {
       _diskAlertSent = false;
     }
@@ -331,9 +315,6 @@ function saveJsonFile(file, data) {
     fs.renameSync(tmp, file);
   } catch (e) {
     console.error(`[persistence] Erreur écriture ${file}:`, e.message);
-    if (e.code === 'ENOSPC' && CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-      sendTelegramNotification(`🚨 ENOSPC sur ${path.basename(file)} — volume Railway PLEIN. Données NON sauvegardées.`).catch(() => {});
-    }
   }
 }
 
@@ -879,23 +860,6 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   } else if (!CONFIG.INTERNAL_NOTIF_PHONE) {
     console.log(`[internal-notif] (info) INTERNAL_NOTIF_PHONE non configuré → pas de WhatsApp ping. Lead ${leadId}.`);
   }
-  // 3. Notif Telegram à Norman (canal urgent supplémentaire, indispensable à terme
-  //    quand le WhatsApp interne ne marchera plus en prod Meta sans template approuvé).
-  if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-    try {
-      const txt =
-        `🚨 <b>Lead traité auto — ACTION ADLEAD URGENTE</b>\n\n` +
-        `• <b>Programme</b> : ${escapeTelegramHtml(programName || 'inconnu')}\n` +
-        `• <b>Contact</b> : ${escapeTelegramHtml(contactName || contactEmail || 'inconnu')}\n` +
-        `• <b>Email</b> : <code>${escapeTelegramHtml(contactEmail || 'n/a')}</code>\n\n` +
-        `→ <a href="${adleadUrl}">Ouvrir dans Adlead</a>\n\n` +
-        `<i>Pose une action Adlead avant qu'un autre vendeur ne te vole le lead.</i>`;
-      const resp = await sendTelegramNotification(txt);
-      console.log(`[internal-notif] ✅ Telegram envoyé (message_id: ${resp?.result?.message_id || 'n/a'}) — lead ${leadId}`);
-    } catch (e) {
-      console.error(`[internal-notif] ⚠️ Telegram échec lead ${leadId}: ${e.message}`);
-    }
-  }
 }
 
 // Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
@@ -1366,55 +1330,6 @@ async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
     throw new Error(`Twilio ${res.status}: ${err.slice(0, 200)}`);
   }
   return await res.json();
-}
-
-/**
- * Envoie une notification Telegram à Norman via le bot @Catella_notif_bot.
- * Best-effort : ne bloque pas le caller si Telegram est down ou mal configuré.
- *
- * Format : par défaut parse_mode=HTML pour permettre <b>, <i>, <a>, <code> dans le text.
- * Notif sonore par défaut (disable_notification=false). Pour notif silencieuse,
- * passer { silent: true }.
- *
- * @param {string} text — Texte du message (max 4096 chars Telegram).
- * @param {object} [options]
- * @param {string} [options.parseMode] — 'HTML' (défaut) | 'MarkdownV2' | 'Markdown'
- * @param {boolean} [options.silent] — true → notif silencieuse (no sound on phone)
- * @returns {Promise<object|null>} — Réponse Telegram API (null si désactivé)
- */
-async function sendTelegramNotification(text, options = {}) {
-  if (!CONFIG.TELEGRAM_NOTIF_ENABLED) return null;
-  if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
-    throw new Error('Telegram non configuré (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant)');
-  }
-  const url = `https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const body = {
-    chat_id: CONFIG.TELEGRAM_CHAT_ID,
-    text: text.slice(0, 4096), // hard cap Telegram
-    parse_mode: options.parseMode || 'HTML',
-    disable_web_page_preview: options.disableWebPagePreview !== false,
-    disable_notification: options.silent === true,
-  };
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => '');
-    throw new Error(`Telegram ${res.status}: ${err.slice(0, 200)}`);
-  }
-  return await res.json();
-}
-
-// Helper : escape HTML pour passer dans Telegram en parse_mode HTML.
-// Telegram HTML accepte seulement <b>, <i>, <u>, <s>, <a>, <code>, <pre>, <tg-spoiler>,
-// <blockquote>. Toutes les autres balises doivent être escapées.
-function escapeTelegramHtml(s) {
-  return String(s || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 function buildWhatsAppMessage(ctx) {
@@ -2587,9 +2502,6 @@ app.post('/api/scheduler/run', async (req, res) => {
   res.json({ triggered: true, pending: pendingLeads.length });
 });
 
-// Endpoint de test Telegram : envoie un message bidon pour valider le canal.
-// Usage : POST /api/test/telegram (body JSON optionnel : { text: "..." })
-// Réponse : { ok, telegram: <api response> } ou { ok: false, error: ... }.
 // POST /api/test/email-preview — envoie un email de test avec le template choisi
 // Body : { template: "j1"|"j3-day1"|"j3-day2"|"j3-day3"|"j15-day1"|"j15-day2"|"j15-day3", to?: "email", programName?: "...", salutation?: "..." }
 app.post('/api/test/email-preview', async (req, res) => {
@@ -2631,61 +2543,6 @@ app.post('/api/test/email-preview', async (req, res) => {
   }
 });
 
-app.post('/api/test/telegram', async (req, res) => {
-  const text = (req.body && req.body.text) || `🧪 <b>Test Telegram</b> depuis lead-automation Railway\n\nSi tu vois ce message, le canal Telegram est OK.\n\n<i>Heure serveur : ${new Date().toISOString()}</i>`;
-  try {
-    const resp = await sendTelegramNotification(text);
-    res.json({
-      ok: true,
-      enabled: CONFIG.TELEGRAM_NOTIF_ENABLED,
-      hasToken: !!CONFIG.TELEGRAM_BOT_TOKEN,
-      hasChatId: !!CONFIG.TELEGRAM_CHAT_ID,
-      telegram: resp,
-    });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      enabled: CONFIG.TELEGRAM_NOTIF_ENABLED,
-      hasToken: !!CONFIG.TELEGRAM_BOT_TOKEN,
-      hasChatId: !!CONFIG.TELEGRAM_CHAT_ID,
-      error: e.message,
-    });
-  }
-});
-
-// POST /api/admin/notify-missed-wa-replies
-// Envoie une notif Telegram pour chaque réponse WhatsApp déjà en base mais pas encore notifiée.
-app.post('/api/admin/notify-missed-wa-replies', async (req, res) => {
-  const replies = processedLeads.filter(l =>
-    l.status === 'whatsapp_reply_received' && l.whatsappBody && !l.telegramNotified
-  );
-  let sent = 0, failed = 0;
-  for (const rec of replies) {
-    try {
-      const adUrl = rec.leadId && rec.programId
-        ? buildAdleadLeadUrl(rec.programId, rec.leadId) : null;
-      const when = rec.receivedAt
-        ? new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
-        : '—';
-      const tgText = rec.matched
-        ? `📱 <b>RÉPONSE WhatsApp — ${escapeTelegramHtml(rec.contactName || rec.whatsappFrom)}</b>\n\n` +
-          `• <b>Programme</b> : ${escapeTelegramHtml(rec.programName || '—')}\n` +
-          `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
-          `• <b>Reçu le</b> : ${when}\n\n` +
-          `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>\n\n` +
-          (adUrl ? `→ <a href="${adUrl}">Ouvrir dans Adlead</a>` : '')
-        : `📱 <b>WhatsApp inconnu</b>\n• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n• <b>Reçu le</b> : ${when}\n\n<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>`;
-      await sendTelegramNotification(tgText);
-      rec.telegramNotified = true;
-      sent++;
-      await new Promise(r => setTimeout(r, 400)); // évite flood Telegram
-    } catch (e) {
-      failed++;
-    }
-  }
-  if (sent > 0) saveProcessed();
-  res.json({ total: replies.length, sent, failed });
-});
 
 // Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
 // Usage : POST /api/test/adlead-update?programId=X&leadId=Y
@@ -4004,9 +3861,6 @@ app.post('/webhook/adlead', (req, res) => {
     savePending();
     saveProcessed();
     console.log(`[webhook] interest ${interestId} lead ${leadId || entry.leadId} — ANNULÉ temps réel : ${reason}`);
-    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-      sendTelegramNotification(`✅ Lead ${leadId || entry.leadId} annulé en temps réel — commercial actif (statut → "${newStatus}")`).catch(() => {});
-    }
     return res.status(200).json({ message: 'Lead annulé en temps réel', interestId, newStatus });
   }
 
@@ -4050,11 +3904,7 @@ app.post('/webhook/adlead', (req, res) => {
     enqueueLead(req.body);
   } catch (err) {
     console.error('[webhook] Erreur enqueue:', err.message);
-    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-      sendTelegramNotification(`🚨 [webhook/adlead] Erreur enqueue lead — lead PERDU : ${err.message}`).catch(() => {});
-    }
-    // On retourne quand même 200 pour éviter la rélivraison Adlead (qui relivrerait en boucle)
-    // mais on alerte via Telegram pour intervention manuelle.
+    // On retourne quand même 200 pour éviter la rélivraison Adlead (qui relivrerait en boucle).
   }
   res.status(200).json({ message: 'Reçu, en attente de traitement' });
 });
@@ -4476,31 +4326,6 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
         }
       }
 
-      // 5c. Notif Telegram à Norman (canal urgent supplémentaire — indépendant du WhatsApp
-      //     interne qui ne marchera plus en prod Meta sans template approuvé).
-      if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-        try {
-          const tgText = match ? (
-            `📱 <b>RÉPONSE WhatsApp prospect — ACTION ADLEAD URGENTE</b>\n\n` +
-            `• <b>Prospect</b> : ${escapeTelegramHtml(contactDisplay)}\n` +
-            `• <b>Programme</b> : ${escapeTelegramHtml(match.programName || '—')}\n` +
-            `• <b>Numéro</b> : <code>${escapeTelegramHtml(fromE164)}</code>${profileName ? ` <i>(${escapeTelegramHtml(profileName)})</i>` : ''}\n\n` +
-            `<blockquote>${escapeTelegramHtml(body.slice(0, 800))}${body.length > 800 ? '…' : ''}</blockquote>\n\n` +
-            `→ <a href="${adleadUrl}">Ouvrir dans Adlead</a>\n\n` +
-            `<i>⚠️ Pose une action Adlead immédiatement (autre vendeur peut prendre le lead).</i>`
-          ) : (
-            `📱 <b>WhatsApp inconnu</b> — lead non identifié\n\n` +
-            `• <b>Numéro</b> : <code>${escapeTelegramHtml(fromE164)}</code>${profileName ? ` <i>(${escapeTelegramHtml(profileName)})</i>` : ''}\n\n` +
-            `<blockquote>${escapeTelegramHtml(body.slice(0, 800))}${body.length > 800 ? '…' : ''}</blockquote>\n\n` +
-            `<i>Aucun lead "sent" trouvé pour ce numéro. Voir mail pour détails.</i>`
-          );
-          const resp = await sendTelegramNotification(tgText);
-          console.log(`[webhook/whatsapp-incoming] ✅ Telegram envoyé (message_id: ${resp?.result?.message_id || 'n/a'})`);
-        } catch (e) {
-          console.error(`[webhook/whatsapp-incoming] ⚠️ Telegram échec: ${e.message}`);
-        }
-      }
-
       // 6. Sales-action Adlead "Réponse WhatsApp reçue" (seulement si lead matché)
       if (match) {
         try {
@@ -4865,13 +4690,6 @@ async function j15Tick({ dryRun = false } = {}) {
         errors: errCount,
         skipReasons,
       };
-      if (sentCount + errCount > 0) {
-        try {
-          await sendTelegramNotification(
-            `📤 <b>Tick J+15</b>\nCandidats: ${candidates.length}\nEnvoyés: ${sentCount}\nSkip: ${skipCount}\nErreurs: ${errCount}`
-          );
-        } catch (_) {}
-      }
     }
     return { dryRun, candidates: candidates.length, results };
   } finally {
@@ -5275,13 +5093,6 @@ async function j3mTick({ dryRun = false } = {}) {
         errors: errCount,
         skipReasons,
       };
-      if (sentCount + errCount > 0) {
-        try {
-          await sendTelegramNotification(
-            `📤 <b>Tick J+3 matin</b>\nCandidats: ${candidates.length}\nEnvoyés: ${sentCount}\nSkip: ${skipCount}\nErreurs: ${errCount}`
-          );
-        } catch (_) {}
-      }
     }
     return { dryRun, candidates: candidates.length, results };
   } finally {
@@ -5745,33 +5556,6 @@ async function pollWhatsAppReplies() {
   if (inserted > 0) {
     saveProcessed();
     console.log(`[wa-poll] ✅ ${inserted} nouvelles réponses WA injectées (${allMessages.length} scannées, ${pageCount} pages)`);
-
-    // Notif Telegram immédiate pour chaque nouveau message
-    for (const rec of newRecords) {
-      if (!rec.whatsappBody) continue;
-      try {
-        const adUrl = rec.leadId && rec.programId
-          ? buildAdleadLeadUrl(rec.programId, rec.leadId)
-          : null;
-        const tgText = rec.matched
-          ? `📱 <b>RÉPONSE WhatsApp prospect — ACTION ADLEAD URGENTE</b>\n\n` +
-            `• <b>Prospect</b> : ${escapeTelegramHtml(rec.contactName || rec.whatsappFrom)}\n` +
-            `• <b>Programme</b> : ${escapeTelegramHtml(rec.programName || '—')}\n` +
-            `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
-            `• <b>Reçu le</b> : ${new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}\n\n` +
-            `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>\n\n` +
-            (adUrl ? `→ <a href="${adUrl}">Ouvrir dans Adlead</a>\n\n` : '') +
-            `<i>⚠️ Réponds depuis le dashboard ou pose une action Adlead.</i>`
-          : `📱 <b>WhatsApp inconnu</b> (lead non identifié)\n\n` +
-            `• <b>Numéro</b> : <code>${escapeTelegramHtml(rec.whatsappFrom)}</code>\n` +
-            `• <b>Reçu le</b> : ${new Date(rec.receivedAt).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}\n\n` +
-            `<blockquote>${escapeTelegramHtml(rec.whatsappBody.slice(0, 800))}</blockquote>`;
-        await sendTelegramNotification(tgText);
-      } catch (e) {
-        console.error('[wa-poll] notif Telegram échec:', e.message);
-      }
-      await new Promise(r => setTimeout(r, 300));
-    }
   } else {
     console.log(`[wa-poll] ✓ ${allMessages.length} messages scannés — rien de nouveau`);
   }
@@ -5816,82 +5600,15 @@ setTimeout(() => backupProcessed().catch(() => {}), 10 * 1000);
 // Puis toutes les 24h
 setInterval(() => backupProcessed().catch(() => {}), 24 * 60 * 60 * 1000);
 
-// ─── RÉCAP QUOTIDIEN RÉPONSES WHATSAPP ──────────────────────────────────────
-// Chaque matin à 9h Paris : Telegram avec les conversations WA en attente
-// de réponse (prospect a répondu mais Norman n'a pas encore répondu).
-// Rappelle aussi combien de conversations sont actives au total.
-
-let waRecapLastRun = null;
-
-async function waConversationsDailyCron() {
-  if (!CONFIG.TELEGRAM_NOTIF_ENABLED || !CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) return;
-  const nowParis = new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
-  const [h, m] = nowParis.split(':').map(Number);
-  if (h !== 9 || m > 4) return; // fenêtre 9h00-9h04
-  const todayKey = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' });
-  if (waRecapLastRun === todayKey) return;
-  waRecapLastRun = todayKey;
-
-  // Reconstruit les conversations depuis processedLeads
-  const convMap = {};
-  for (const l of processedLeads) {
-    let phone = null, direction = null;
-    if (l.status === 'sent' && l.whatsappSid && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
-    else if (l.status === 'whatsapp_reply_received' && l.whatsappFrom) { phone = l.whatsappFrom; direction = 'in'; }
-    else if (l.status === 'whatsapp_reply_sent' && l.whatsappTo) { phone = l.whatsappTo; direction = 'out'; }
-    if (!phone) continue;
-    if (!convMap[phone]) convMap[phone] = { phone, contactName: null, programName: null, messages: [] };
-    const c = convMap[phone];
-    if (l.contactName && !c.contactName) c.contactName = l.contactName;
-    if (l.programName && !c.programName) c.programName = l.programName;
-    c.messages.push({ direction, time: l.processedAt || l.receivedAt });
-  }
-
-  // Conversations avec réponse prospect non traitée :
-  // dernière message = entrant (in) sans réponse sortante (out) après
-  const pending = [];
-  for (const c of Object.values(convMap)) {
-    const sorted = c.messages.slice().sort((a, b) => new Date(a.time) - new Date(b.time));
-    const lastMsg = sorted[sorted.length - 1];
-    if (lastMsg && lastMsg.direction === 'in') {
-      pending.push({ ...c, lastReplyAt: lastMsg.time });
-    }
-  }
-  pending.sort((a, b) => new Date(a.lastReplyAt) - new Date(b.lastReplyAt)); // plus anciennes en premier
-
-  const totalConvs = Object.values(convMap).filter(c => c.messages.some(m => m.direction === 'in')).length;
-
-  let txt = `📱 *Récap WA quotidien — ${todayKey}*\n`;
-  txt += `${totalConvs} conversation${totalConvs !== 1 ? 's' : ''} actives`;
-  if (pending.length === 0) {
-    txt += ` — ✅ tout est traité`;
-  } else {
-    txt += ` — ⚠️ *${pending.length} en attente de réponse*\n\n`;
-    for (const c of pending.slice(0, 10)) {
-      const name = c.contactName || c.phone;
-      const prog = c.programName || '—';
-      const age = Math.round((Date.now() - new Date(c.lastReplyAt).getTime()) / (1000 * 60 * 60));
-      txt += `• ${name} (${prog}) — il y a ${age}h\n`;
-    }
-    if (pending.length > 10) txt += `… et ${pending.length - 10} autres`;
-  }
-
-  await sendTelegramNotification(txt, { parse_mode: 'Markdown' }).catch(e =>
-    console.error('[wa-recap] Telegram erreur:', e.message)
-  );
-  console.log(`[wa-recap] récap envoyé — ${totalConvs} convs, ${pending.length} en attente`);
-}
-setInterval(() => waConversationsDailyCron().catch(e => console.error('[wa-recap] erreur:', e.message)), 5 * 60 * 1000);
-
 // ─── ALERTE FENÊTRE WA SUR LE POINT D'EXPIRER ───────────────────────────────
 // Toutes les 5 min : détecte les conversations où le prospect a répondu
 // il y a 20h (fenêtre de 24h Meta → expire dans ~4h) sans réponse de Norman.
-// Envoie une alerte WhatsApp + Telegram sur son numéro perso.
+// Envoie une alerte WhatsApp sur son numéro perso.
 
 const waWindowAlertSent = new Set(); // clé = phone+date pour éviter les répétitions
 
 async function waWindowExpiryAlert() {
-  if (!CONFIG.WHATSAPP_ENABLED && !CONFIG.TELEGRAM_NOTIF_ENABLED) return;
+  if (!CONFIG.WHATSAPP_ENABLED) return;
 
   const now = Date.now();
   const H20 = 20 * 60 * 60 * 1000; // 20h = fenêtre à 4h de fermeture
@@ -5935,9 +5652,6 @@ async function waWindowExpiryAlert() {
     if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
       sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, msg)
         .catch(e => console.error('[wa-expiry] WA erreur:', e.message));
-    }
-    if (CONFIG.TELEGRAM_NOTIF_ENABLED && CONFIG.TELEGRAM_BOT_TOKEN && CONFIG.TELEGRAM_CHAT_ID) {
-      sendTelegramNotification(msg).catch(e => console.error('[wa-expiry] Telegram erreur:', e.message));
     }
     console.log(`[wa-expiry] alerte envoyée — ${name} (${prog}), fenêtre expire dans ${remaining}h`);
   }
