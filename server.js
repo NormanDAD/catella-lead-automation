@@ -1046,6 +1046,7 @@ function extractLeadIdFromRegistration(r) {
 //                                     (sauf si CONFIG.SKIP_REGISTRATIONS_CHECK=true)
 async function findActiveRegistrationForLead(programId, leadId) {
   if (!programId || !leadId) return null;
+  if (CONFIG.SKIP_REGISTRATIONS_CHECK) return null;
   const result = await fetchProgramRegistrations(programId);
 
   // ── Fail-closed : si on n'a pas pu lister les registrations (403, network,
