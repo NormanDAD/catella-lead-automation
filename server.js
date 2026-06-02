@@ -801,9 +801,20 @@ async function createRelanceSalesAction(programId, leadId) {
   });
 }
 
+// Crée un compte rendu d'événement sur un lead dans Adlead.
+// Requiert le scope record.create sur la clé API.
+// event : voir enum complet dans docs.adlead.immo/v1/records.html
+// Non bloquant — toujours appeler dans un try/catch.
+async function createAdleadRecord(programId, leadId, event, comment) {
+  return adleadPost(`/programs/${programId}/leads/${leadId}/records`, {
+    event,
+    comment: comment || null,
+    occurred_at: new Date().toISOString(),
+  });
+}
+
 // Notification interne à Norman : après l'envoi auto du mail client, on lui envoie
-// un mail "à la main" avec le lien Adlead du lead à traiter manuellement
-// (puisque la MAJ statut et la création d'event côté Adlead sont bloquées via l'API).
+// un mail "à la main" avec le lien Adlead du lead à traiter manuellement.
 function buildAdleadLeadUrl(programId, leadId) {
   return `${CONFIG.ADLEAD_UI_BASE}/programs/${programId}/contact-management/leads/${leadId}`;
 }
@@ -1920,6 +1931,14 @@ async function processPendingLead(entry) {
     await sendEmailViaPowerAutomate(email, subject, htmlBody);
     console.log(`[process] ✅ email envoyé à ${email} — "${subject}" (accroche: ${accroche ? 'oui' : 'non'})`);
 
+    // ── Compte rendu Adlead — email J+1
+    try {
+      await createAdleadRecord(entry.programId, entry.leadId, 'email', 'Relance automatique J+1 — email envoyé via pipeline Catella');
+      console.log(`[process] ✅ record Adlead créé (email J+1) lead ${entry.leadId}`);
+    } catch (e) {
+      console.log(`[process] (info) record Adlead échec lead ${entry.leadId}: ${e.message.slice(0, 120)}`);
+    }
+
     // ── Tracking pour le reply handler : on garde (leadId, programId, email, sujet, sentAt)
     //    pour matcher plus tard les réponses du prospect. Non bloquant si ça plante.
     try {
@@ -2045,6 +2064,12 @@ async function processPendingLead(entry) {
           whatsappSid = resp && resp.sid ? resp.sid : null;
           const mode = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? 'template' : 'body';
           console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (mode: ${mode}, sid: ${whatsappSid})`);
+          try {
+            await createAdleadRecord(entry.programId, entry.leadId, 'sms', 'Relance automatique J+1 — message WhatsApp envoyé via Twilio');
+            console.log(`[process] ✅ record Adlead créé (WhatsApp J+1) lead ${entry.leadId}`);
+          } catch (re) {
+            console.log(`[process] (info) record Adlead WA échec lead ${entry.leadId}: ${re.message.slice(0, 120)}`);
+          }
         } catch (e) {
           whatsappError = e.message;
           console.error(`[process] ⚠️ WhatsApp échec ${phoneE164} lead ${entry.leadId}: ${e.message}`);
@@ -4702,6 +4727,11 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   if (channel === 'email' || channel === 'email-fallback') {
     try { await sendEmailViaPowerAutomate(email, subject, html); }
     catch (e) { emailError = e.message; }
+    if (!emailError) {
+      try {
+        await createAdleadRecord(record.programId, record.leadId, 'email', `Relance automatique J+15 (jour ${dayNumber}/3) — email envoyé via pipeline Catella`);
+      } catch (e) { console.log(`[j15] (info) record Adlead échec lead ${record.leadId}: ${e.message.slice(0, 120)}`); }
+    }
   } else if (channel === 'whatsapp') {
     if (whatsappTo) {
       try {
@@ -4712,6 +4742,11 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
+      if (!whatsappError) {
+        try {
+          await createAdleadRecord(record.programId, record.leadId, 'sms', `Relance automatique J+15 (jour ${dayNumber}/3) — message WhatsApp envoyé via Twilio`);
+        } catch (e) { console.log(`[j15] (info) record Adlead WA échec lead ${record.leadId}: ${e.message.slice(0, 120)}`); }
+      }
     } else {
       whatsappError = 'no valid phone';
     }
@@ -5110,6 +5145,11 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     try {
       await sendEmailViaPowerAutomate(email, subject, html);
     } catch (e) { emailError = e.message; }
+    if (!emailError) {
+      try {
+        await createAdleadRecord(record.programId, record.leadId, 'email', `Relance automatique J+3 (jour ${dayNumber}/3) — email envoyé via pipeline Catella`);
+      } catch (e) { console.log(`[j3m] (info) record Adlead échec lead ${record.leadId}: ${e.message.slice(0, 120)}`); }
+    }
   } else if (channel === 'whatsapp') {
     if (whatsappTo) {
       try {
@@ -5120,6 +5160,11 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
+      if (!whatsappError) {
+        try {
+          await createAdleadRecord(record.programId, record.leadId, 'sms', `Relance automatique J+3 (jour ${dayNumber}/3) — message WhatsApp envoyé via Twilio`);
+        } catch (e) { console.log(`[j3m] (info) record Adlead WA échec lead ${record.leadId}: ${e.message.slice(0, 120)}`); }
+      }
     } else {
       whatsappError = 'no valid phone';
     }
