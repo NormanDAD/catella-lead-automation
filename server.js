@@ -766,19 +766,32 @@ async function addTagToLead(programId, leadId, tagUuid, isGlobal = false) {
   });
 }
 
-// Met à jour le statut d'un lead Adlead.
+// Met à jour le statut d'un lead Adlead via PUT /interest.
 // Statuts valides : to-process, pending, to-follow, ongoing, interested, negotiating,
 //                   discarded, pending-purchaser, purchaser
-// (cf https://docs.adlead.immo/v1/leads.html#statut-d-un-lead)
-// Best-effort : la route PATCH n'est pas officiellement documentée. Si elle retourne
-// 404/405 → throw qu'on attrape côté appelant.
+// Route confirmée par Cédric Morrier (Adlead) le 2026-06-02 :
+//   PUT /v1/{tenantKey}/programs/{programId}/leads/{leadId}/interest
+// Requiert le scope lead.update sur la clé API.
 async function updateLeadStatusAdlead(programId, leadId, statusKey) {
   if (!CONFIG.STATUS_UPDATE_ENABLED) {
     return { skipped: true, reason: 'STATUS_UPDATE_ENABLED=false' };
   }
-  return adleadPatch(`/programs/${programId}/leads/${leadId}`, {
-    status: statusKey,
+  const url = `${CONFIG.ADLEAD_API_BASE}/${CONFIG.ADLEAD_TENANT}/programs/${programId}/leads/${leadId}/interest`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'X-API-Key': CONFIG.ADLEAD_API_KEY,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: statusKey }),
   });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Adlead PUT /interest ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  return json.data || json;
 }
 
 // Créer une sales-action "Traité - Relance J+1" sur le lead (colonne SUIVI COMMERCIAL Adlead)
