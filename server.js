@@ -68,6 +68,11 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  // Agent WhatsApp : réponse auto contextuelle au prospect quand il répond en WhatsApp.
+  // 100% automatique (le texte généré par Claude part directement). Gardé OFF par défaut :
+  // mettre WHATSAPP_AUTO_REPLY_ENABLED=true dans Railway pour armer. Nécessite aussi
+  // ANTHROPIC_API_KEY + WHATSAPP_ENABLED. Ne répond qu'aux numéros matchés à un lead connu.
+  WHATSAPP_AUTO_REPLY_ENABLED: process.env.WHATSAPP_AUTO_REPLY_ENABLED === 'true',
   // Date (ISO YYYY-MM-DD) à partir de laquelle les WhatsApp sont en prod Meta réelle.
   // Les envois antérieurs (sandbox non-délivrés) sont exclus des stats WhatsApp.
   WHATSAPP_PROD_START_DATE: process.env.WHATSAPP_PROD_START_DATE || '',
@@ -4272,6 +4277,80 @@ app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), 
         }
       }
 
+      // 4b. AGENT WHATSAPP — réponse auto contextuelle (100% automatique).
+      //     Gated : flag armé + WhatsApp activé + clé Claude + lead matché + pas un
+      //     retry Twilio (même msgSid). La fenêtre Meta 24h est garantie ouverte
+      //     (le prospect vient d'écrire). Le texte généré par l'agent part DIRECTEMENT
+      //     au prospect. Norman reçoit une copie dans les notifs ci-dessous.
+      const alreadyProcessed = !!(msgSid && processedLeads.some(l => l.whatsappMessageSid === msgSid));
+      let autoReply = null; // { sent, text, note, error }
+      if (CONFIG.WHATSAPP_AUTO_REPLY_ENABLED && CONFIG.WHATSAPP_ENABLED
+          && CONFIG.ANTHROPIC_API_KEY && match && !alreadyProcessed) {
+        try {
+          const prog = findProgramme(match.programName) || {};
+          const leadCtx = {
+            leadId:      match.leadId,
+            programId:   match.programId,
+            contactName: match.contactName || profileName || null,
+            programName: match.programName || null,
+            salutation:  match.contactName || profileName || null,
+          };
+          const programCtx = {
+            name:        match.programName || null,
+            ville:       prog.ville || null,
+            promoteur:   prog.promoteur || null,
+            accroche:    prog.accroche || null,
+            brochureUrl: getBrochureUrl(match.programName),
+          };
+          // Historique conversationnel avec ce numéro (inbound + outbound), chronologique.
+          const history = processedLeads
+            .filter(l => {
+              if (l.status === 'whatsapp_reply_received' && l.whatsappFrom)
+                return normalizeForMatch(l.whatsappFrom) === fromNorm;
+              if (l.status === 'whatsapp_reply_sent' && l.whatsappTo)
+                return normalizeForMatch(l.whatsappTo) === fromNorm;
+              return false;
+            })
+            .map(l => ({
+              direction: l.status === 'whatsapp_reply_sent' ? 'out' : 'in',
+              body:      l.whatsappBody || '',
+              at:        l.receivedAt || l.processedAt || '',
+            }))
+            .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+
+          const draft = await inboxWatcher.draftWhatsAppReply({
+            incomingBody: body, leadContext: leadCtx, programContext: programCtx, history,
+          });
+
+          if (draft.shouldReply && draft.text) {
+            const resp = await sendWhatsAppViaTwilio(fromE164, draft.text);
+            processedLeads.push({
+              id:           `wa-autoreply-${msgSid || Date.now()}`,
+              status:       'whatsapp_reply_sent',
+              leadId:       match.leadId,
+              programId:    match.programId,
+              programName:  match.programName || null,
+              contactName:  match.contactName || null,
+              whatsappTo:   fromE164,
+              whatsappBody: draft.text,
+              whatsappSid:  resp.sid || null,
+              autoReply:    true,
+              inReplyToSid: msgSid || null,
+              processedAt:  new Date().toISOString(),
+            });
+            saveProcessed();
+            autoReply = { sent: true, text: draft.text, note: draft.internalNote };
+            console.log(`[webhook/whatsapp-incoming] 🤖 réponse auto envoyée à ${fromE164} (sid: ${resp.sid})`);
+          } else {
+            autoReply = { sent: false, text: '', note: draft.internalNote || 'Agent a choisi de ne pas répondre.' };
+            console.log(`[webhook/whatsapp-incoming] 🤖 pas de réponse auto (shouldReply=false) : ${draft.internalNote}`);
+          }
+        } catch (e) {
+          autoReply = { sent: false, text: '', error: e.message };
+          console.error(`[webhook/whatsapp-incoming] 🤖 agent auto-reply échec: ${e.message}`);
+        }
+      }
+
       // 5a. Ping email + WhatsApp à Norman (même si pas matché — on lui passe quand même
       //     le message en mode "numéro inconnu" pour qu'il puisse identifier manuellement).
       const adleadUrl = match ? buildAdleadLeadUrl(match.programId, match.leadId) : null;
@@ -4303,6 +4382,16 @@ ${matchSection}
 <blockquote style="border-left: 3px solid #25D366; padding: 10px 12px; color: #222; background: #f6fff8; border-radius: 4px;">
   ${body.replace(/\n/g, '<br>')}
 </blockquote>
+${autoReply ? (autoReply.sent ? `
+<h3 style="margin-top: 24px;">🤖 Réponse auto envoyée au prospect :</h3>
+<blockquote style="border-left: 3px solid #128C7E; padding: 10px 12px; color: #222; background: #f0fbf9; border-radius: 4px;">
+  ${String(autoReply.text).replace(/\n/g, '<br>')}
+</blockquote>
+${autoReply.note ? `<p style="color:#666; font-size:13px;">Note agent : ${autoReply.note}</p>` : ''}
+<p style="font-size:13px; color:#666;">Si la réponse ne te convient pas, réponds toi-même au prospect pour corriger.</p>` : `
+<p style="margin-top: 24px; padding: 12px; background: #fdecea; border-left: 4px solid #d93025; border-radius: 4px;">
+  🤖 <strong>Pas de réponse auto envoyée</strong> — à traiter manuellement.${autoReply.error ? ` (erreur : ${autoReply.error})` : ''}${autoReply.note ? `<br>Raison : ${autoReply.note}` : ''}
+</p>`) : ''}
 ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; border-left: 4px solid #f0c000; border-radius: 4px;">
   ⚠️ <strong>Pense à poser une action côté Adlead</strong> pour bloquer le lead (sinon un autre commercial peut le récupérer).
 </p>` : ''}
@@ -4319,8 +4408,13 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
       // 5b. WhatsApp à Norman (notif urgente courte sur son téléphone)
       if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
         try {
+          const autoReplyWaLine = autoReply
+            ? (autoReply.sent
+                ? `\n\n🤖 Réponse auto envoyée :\n"${String(autoReply.text).slice(0, 250)}${autoReply.text.length > 250 ? '…' : ''}"`
+                : `\n\n🤖 Pas de réponse auto (à traiter)${autoReply.error ? ` — erreur : ${autoReply.error}` : autoReply.note ? ` — ${autoReply.note}` : ''}`)
+            : '';
           const waBody = match
-            ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD URGENTE\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"\n\n→ Adlead : ${adleadUrl}`
+            ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD URGENTE\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"${autoReplyWaLine}\n\n→ Adlead : ${adleadUrl}`
             : `📱 WhatsApp inconnu ${profileName ? `(${profileName})` : ''} — ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"\n\n(pas matché à un lead — voir mail)`;
           const resp = await sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
           console.log(`[webhook/whatsapp-incoming] ✅ WhatsApp Norman envoyé (sid: ${resp.sid})`);
@@ -4362,6 +4456,7 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
         whatsappProfileName: profileName,
         relatedSentId: match ? match.id : null,
         matched: !!match,
+        autoReplied: !!(autoReply && autoReply.sent),
         receivedAt: new Date().toISOString(),
         processedAt: new Date().toISOString(),
       });
