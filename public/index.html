@@ -924,6 +924,43 @@
     color: var(--text-dim);
   }
 
+  /* ── Section relances 3 colonnes ────────────────────────────────── */
+  .relance-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin-bottom: 24px;
+  }
+  @media (max-width: 900px) { .relance-grid { grid-template-columns: 1fr; } }
+
+  .relance-panel {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-top: 4px solid var(--border);
+  }
+  .relance-panel.j1 { border-top-color: #4a90d9; }
+  .relance-panel.j3 { border-top-color: #f39c12; }
+  .relance-panel.j15 { border-top-color: #e74c3c; }
+
+  .relance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 12px;
+  }
+  .relance-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .relance-count {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+
   /* ── Sections priorités et pipeline du jour ─────────────────────── */
   .priority-grid {
     display: grid;
@@ -1141,6 +1178,35 @@
 
   </div>
 
+  <!-- ── RELANCES EN COURS ─────────────────────────────────────── -->
+  <div class="relance-grid">
+
+    <div class="relance-panel j1">
+      <div class="relance-header">
+        <div class="relance-title">J+1 — Premier contact</div>
+        <div class="relance-count" id="relance-j1-count">—</div>
+      </div>
+      <div id="relance-j1-list"><div class="priority-empty">Chargement…</div></div>
+    </div>
+
+    <div class="relance-panel j3">
+      <div class="relance-header">
+        <div class="relance-title">J+3 — Relance</div>
+        <div class="relance-count" id="relance-j3-count">—</div>
+      </div>
+      <div id="relance-j3-list"><div class="priority-empty">Chargement…</div></div>
+    </div>
+
+    <div class="relance-panel j15">
+      <div class="relance-header">
+        <div class="relance-title">J+15 — Dernière tentative</div>
+        <div class="relance-count" id="relance-j15-count">—</div>
+      </div>
+      <div id="relance-j15-list"><div class="priority-empty">Chargement…</div></div>
+    </div>
+
+  </div>
+
   <!-- ── PIPELINE DU JOUR ───────────────────────────────────────── -->
   <div class="day-grid">
 
@@ -1341,6 +1407,13 @@
           <div class="run-report-summary" id="j3m-run-summary"></div>
           <div class="run-report-reasons" id="j3m-run-reasons"></div>
         </div>
+        <div style="padding:10px 14px 4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;border-top:1px solid #f0f0f2;">
+          <span style="font-size:11px;color:var(--text-dim);flex-shrink:0;">Test email →</span>
+          <button onclick="sendEmailPreview('j3-day1')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 1</button>
+          <button onclick="sendEmailPreview('j3-day2')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 2</button>
+          <button onclick="sendEmailPreview('j3-day3')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+3 Jour 3</button>
+          <span id="j3m-preview-status" style="font-size:11px;color:var(--text-dim);"></span>
+        </div>
       </div>
 
       <!-- J+15 -->
@@ -1372,6 +1445,13 @@
           <div class="run-report-summary" id="j15-run-summary"></div>
           <div class="run-report-reasons" id="j15-run-reasons"></div>
         </div>
+        <div style="padding:10px 14px 4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;border-top:1px solid #f0f0f2;">
+          <span style="font-size:11px;color:var(--text-dim);flex-shrink:0;">Test email →</span>
+          <button onclick="sendEmailPreview('j15-day1')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 1</button>
+          <button onclick="sendEmailPreview('j15-day2')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 2</button>
+          <button onclick="sendEmailPreview('j15-day3')" style="padding:3px 10px;background:#f0f0f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;">J+15 Jour 3</button>
+          <span id="j15-preview-status" style="font-size:11px;color:var(--text-dim);"></span>
+        </div>
       </div>
 
     </div>
@@ -1394,10 +1474,44 @@
           <div class="panel-title">Top programmes</div>
           <div class="panel-subtitle">Leads traités par programme</div>
         </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <button onclick="resolveAndBackfillPrograms()" id="btn-resolve-programs" style="padding:4px 10px;background:#f0f0f2;border:none;border-radius:5px;cursor:pointer;font-size:11px;color:#1d1d1f;white-space:nowrap;">Résoudre noms</button>
+          <span id="resolve-programs-status" style="font-size:11px;color:var(--text-dim);"></span>
+        </div>
       </div>
       <div class="prog-list" id="prog-list">
         <div style="color: var(--text-dim); font-size: 13px;">Chargement…</div>
       </div>
+    </div>
+  </div>
+
+  <!-- Brochures -->
+  <div class="panel" id="brochures-panel">
+    <div class="panel-header" style="cursor:pointer;" onclick="toggleBrochuresPanel()">
+      <div>
+        <div class="panel-title">Brochures PDF <span id="brochures-count" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:6px;"></span></div>
+        <div class="panel-subtitle">Gérer les PDFs servis aux prospects via le bouton de l'email J+1</div>
+      </div>
+      <span id="brochures-chevron" style="font-size:18px;color:var(--text-dim);transition:transform .2s;">▸</span>
+    </div>
+    <div id="brochures-body" style="display:none;padding:0 16px 16px;">
+      <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input id="brochures-token" type="password" placeholder="Admin token (ADMIN_UPLOAD_TOKEN)" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid #e5e5ea;border-radius:6px;font-size:13px;background:#fff;color:#1d1d1f;" oninput="saveBrochureToken(this.value)" />
+        <button onclick="loadBrochuresStatus()" style="padding:7px 14px;background:#1a3a5c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;">Charger le statut</button>
+      </div>
+      <div id="disk-usage-bar" style="display:none;margin-bottom:12px;padding:10px 14px;background:#fff7e6;border:1px solid #ffd580;border-radius:8px;font-size:13px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+          <div id="disk-usage-text" style="font-weight:600;color:#7d4a00;"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button onclick="purgerBrochures()" style="padding:5px 12px;background:#c0392b;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">Purger brochures</button>
+            <button onclick="trimProcessed()" style="padding:5px 12px;background:#e67e22;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;">Archiver anciens leads</button>
+          </div>
+        </div>
+        <div id="disk-usage-detail" style="margin-top:6px;font-size:12px;color:#6e6e73;"></div>
+      </div>
+      <div id="brochures-upload-status" style="font-size:13px;color:var(--text-dim);margin-bottom:10px;min-height:16px;"></div>
+      <div id="brochures-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px;"></div>
+      <input id="brochures-file-hidden" type="file" accept=".pdf" style="display:none;" />
     </div>
   </div>
 
@@ -1809,6 +1923,55 @@
     }
   }
 
+  async function renderRelances() {
+    try {
+      const res = await fetch('/api/leads', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const all = await res.json();
+      const now = Date.now();
+
+      const j1  = all.filter(r => r.status === 'sent' && (r.j3mRelances || 0) === 0 && (r.j15Relances || 0) === 0);
+      const j3  = all.filter(r => (r.j3mRelances || 0) > 0);
+      const j15 = all.filter(r => (r.j15Relances || 0) > 0);
+
+      const visited = getVisitedLeads();
+      const renderList = (containerId, countId, items) => {
+        el(countId).textContent = items.length;
+        if (items.length === 0) {
+          el(containerId).innerHTML = '<div class="priority-empty">Aucun contact</div>';
+          return;
+        }
+        el(containerId).innerHTML = items.slice(0, 20).map(r => {
+          const name = esc(r.contactName || r.email || '—');
+          const prog = esc(r.programName || ('Programme #' + (r.programId || '?')));
+          const ago  = timeAgo(r.processedAt);
+          const adUrl = r.programId && r.leadId ? adleadUrl(r.programId, r.leadId) : null;
+          const lid  = r.leadId ? String(r.leadId) : null;
+          const isVisited = lid && visited.has(lid);
+          const adBtn = adUrl
+            ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:3px 8px;" onclick="markLeadVisited('${esc(lid)}')">↗</a>`
+            : '';
+          const bg = isVisited ? 'background:#e8f7ee;border-left:3px solid #25a244;' : '';
+          return `<div class="priority-item" style="${bg}">
+            <div class="priority-info">
+              <div class="priority-name" style="${isVisited ? 'color:#1d7a3a;' : ''}">${name}</div>
+              <div class="priority-prog">${prog} · ${ago}</div>
+            </div>
+            <div class="priority-actions">${adBtn}</div>
+          </div>`;
+        }).join('');
+      };
+
+      renderList('relance-j1-list',  'relance-j1-count',  j1);
+      renderList('relance-j3-list',  'relance-j3-count',  j3);
+      renderList('relance-j15-list', 'relance-j15-count', j15);
+    } catch (e) {
+      ['relance-j1-list', 'relance-j3-list', 'relance-j15-list'].forEach(id => {
+        el(id).innerHTML = `<div class="priority-empty" style="color:var(--catella-red);">Erreur</div>`;
+      });
+    }
+  }
+
   async function renderPipelineToday() {
     const container = el('pipeline-today-list');
     const countEl   = el('pipeline-today-count');
@@ -1824,6 +1987,7 @@
       }
       // Trier par heure d'envoi croissante
       today.sort((a, b) => new Date(a.processedAt) - new Date(b.processedAt));
+      const visited = getVisitedLeads();
       const items = today.map(r => {
         const hour = new Date(r.processedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
         const name = esc(r.contactName || r.email || '—');
@@ -1831,13 +1995,16 @@
         const tel  = r.whatsappTo ? esc(r.whatsappTo) : '';
         const telLink = tel ? `<a href="tel:${tel}" class="priority-tel" style="font-size:12px;">📞</a>` : '';
         const adUrl = r.programId && r.leadId ? adleadUrl(r.programId, r.leadId) : null;
+        const lid = r.leadId || r.id || '';
+        const isVisited = lid && visited.has(String(lid));
         const adBtn = adUrl
-          ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:2px 7px;">↗</a>`
+          ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn" style="font-size:11px;padding:2px 7px;" onclick="markLeadVisited('${esc(String(lid))}')">↗</a>`
           : '';
-        return `<div class="day-item">
-          <div class="day-time">${hour}</div>
+        const bg = isVisited ? 'background:#e8f7ee;border-left:3px solid #25a244;' : '';
+        return `<div class="day-item" style="${bg}">
+          <div class="day-time" style="${isVisited ? 'color:#25a244;font-weight:600;' : ''}">${hour}</div>
           <div class="day-info">
-            <div class="day-name">${name}</div>
+            <div class="day-name" style="${isVisited ? 'color:#1d7a3a;' : ''}">${name}</div>
             <div class="day-prog">${prog}</div>
           </div>
           <div class="day-actions">${telLink}${adBtn}</div>
@@ -2040,6 +2207,7 @@
     // Sections priorités et pipeline du jour
     renderPriorityWA();
     renderPriorityHot();
+    renderRelances();
     renderPipelineToday();
     renderPipelinePending();
   }
@@ -2214,7 +2382,7 @@
       const res = await fetch(view.source, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const all = await res.json();
-      const list = all.filter(view.filter).reverse(); // récents en premier
+      const list = all.filter(view.filter); // /api/leads retourne déjà récents en premier
       if (list.length === 0) {
         el('modal-body').innerHTML = '<div class="modal-empty">Aucun lead dans cette catégorie.</div>';
         return;
@@ -2263,8 +2431,12 @@
       ? `<tr><th>Date</th><th>Programme</th><th>Contact</th><th>De (WhatsApp)</th><th>Message</th><th>Match</th><th>Adlead</th></tr>`
       : `<tr><th>Date</th><th>Programme</th><th>Contact</th><th>Email</th><th>Statut</th><th>WA</th><th>Adlead</th></tr>`;
 
+    const hasUnknown = list.some(r => !r.programName || /^Programme #/.test(r.programName));
+    const resolveBtn = hasUnknown
+      ? `<button onclick="resolveAndBackfillPrograms(true)" style="padding:4px 10px;background:#1a3a5c;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;margin-left:10px;" id="btn-resolve-modal">Résoudre les "Programme #?"</button><span id="resolve-programs-status" style="font-size:11px;color:var(--text-dim);margin-left:8px;"></span>`
+      : '';
     el('modal-body').innerHTML = `
-      <div style="margin-bottom: 12px; color: var(--text-dim); font-size: 13px;">${list.length} lead(s)</div>
+      <div style="margin-bottom: 12px; color: var(--text-dim); font-size: 13px; display:flex; align-items:center; flex-wrap:wrap; gap:4px;">${list.length} lead(s)${resolveBtn}</div>
       <table class="modal-table">
         <thead>${headers}</thead>
         <tbody>${rows}</tbody>
@@ -2415,6 +2587,213 @@
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // ── Leads visités (vert après clic ↗) ────────────────────────────────────
+
+  const VISITED_KEY = 'catella_visited_leads';
+
+  function getVisitedLeads() {
+    try { return new Set(JSON.parse(localStorage.getItem(VISITED_KEY) || '[]')); } catch { return new Set(); }
+  }
+
+  function markLeadVisited(leadId) {
+    if (!leadId) return;
+    const visited = getVisitedLeads();
+    visited.add(String(leadId));
+    try { localStorage.setItem(VISITED_KEY, JSON.stringify([...visited])); } catch {}
+    // Recolore immédiatement sans attendre le prochain refresh
+    document.querySelectorAll('.day-item, .priority-item').forEach(el => {
+      const btn = el.querySelector('a[onclick*="' + leadId + '"]');
+      if (btn) {
+        el.style.background = '#e8f7ee';
+        el.style.borderLeft = '3px solid #25a244';
+        const timeEl = el.querySelector('.day-time');
+        const nameEl = el.querySelector('.day-name, .priority-name');
+        if (timeEl) { timeEl.style.color = '#25a244'; timeEl.style.fontWeight = '600'; }
+        if (nameEl) nameEl.style.color = '#1d7a3a';
+      }
+    });
+  }
+
+  // ── Résolution noms de programmes ─────────────────────────────────────────
+
+  async function resolveAndBackfillPrograms(inModal = false) {
+    const btnId = inModal ? 'btn-resolve-modal' : 'btn-resolve-programs';
+    const btn = el(btnId);
+    const status = el('resolve-programs-status');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Résolution via Adlead…';
+    try {
+      const r1 = await fetch('/api/admin/resolve-program-names', { method: 'POST' });
+      const d1 = await r1.json();
+      if (!r1.ok) { if (status) status.textContent = '❌ ' + (d1.error || r1.status); if (btn) btn.disabled = false; return; }
+      if (status) status.textContent = `${d1.resolved} résolus, backfill…`;
+      const r2 = await fetch('/api/admin/backfill-program-names', { method: 'POST' });
+      const d2 = await r2.json();
+      if (!r2.ok) { if (status) status.textContent = '❌ ' + (d2.error || r2.status); if (btn) btn.disabled = false; return; }
+      if (status) status.textContent = `✅ ${d1.resolved} noms résolus · ${d2.updated} leads mis à jour`;
+      if (btn) btn.disabled = false;
+      if (inModal) setTimeout(() => openModal('total'), 800);
+      else setTimeout(() => refresh(), 1000);
+    } catch (e) {
+      if (status) status.textContent = '❌ ' + e.message;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // ── Test email preview ────────────────────────────────────────────────────
+
+  async function sendEmailPreview(template) {
+    const statusId = template.startsWith('j3') ? 'j3m-preview-status' : 'j15-preview-status';
+    const statusEl = el(statusId);
+    statusEl.textContent = 'Envoi…';
+    try {
+      const r = await fetch('/api/test/email-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template, programName: 'Esprit Montmartre' }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        statusEl.textContent = '✅ Envoyé sur norman.dadon@catella.com';
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+      } else {
+        statusEl.textContent = '❌ ' + (d.error || r.status);
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
+
+  // ── Brochures ──────────────────────────────────────────────────────────────
+
+  let _brochuresOpen = false;
+  let _brochuresList = [];
+
+  function saveBrochureToken(v) {
+    sessionStorage.setItem('brochure_token', v);
+  }
+
+  function toggleBrochuresPanel() {
+    _brochuresOpen = !_brochuresOpen;
+    el('brochures-body').style.display = _brochuresOpen ? 'block' : 'none';
+    el('brochures-chevron').style.transform = _brochuresOpen ? 'rotate(90deg)' : '';
+    if (_brochuresOpen) {
+      const saved = sessionStorage.getItem('brochure_token') || '';
+      el('brochures-token').value = saved;
+      if (saved) loadBrochuresStatus();
+    }
+  }
+
+  async function loadBrochuresStatus() {
+    const token = el('brochures-token').value.trim();
+    if (!token) { el('brochures-upload-status').textContent = '⚠️ Entrez votre admin token.'; return; }
+    sessionStorage.setItem('brochure_token', token);
+    el('brochures-upload-status').textContent = 'Chargement…';
+    try {
+      const [rStatus, rDisk] = await Promise.all([
+        fetch('/api/admin/brochures/status', { headers: { 'x-admin-token': token } }),
+        fetch('/api/admin/disk-usage',        { headers: { 'x-admin-token': token } }),
+      ]);
+      if (rStatus.status === 401) { el('brochures-upload-status').textContent = '❌ Token invalide.'; return; }
+      _brochuresList = await rStatus.json();
+      renderBrochuresList();
+      if (rDisk.ok) {
+        const d = await rDisk.json();
+        const usedMb = +(d.totalMb - d.freeMb).toFixed(1);
+        const pct = d.totalMb > 0 ? Math.round(usedMb / d.totalMb * 100) : 0;
+        const bar = el('disk-usage-bar');
+        bar.style.display = 'block';
+        bar.style.background = d.freeMb < 80 ? '#fff0f0' : '#fff7e6';
+        bar.style.borderColor = d.freeMb < 80 ? '#e5a0a0' : '#ffd580';
+        el('disk-usage-text').textContent = `Volume Railway : ${d.freeMb} MB libres / ${d.totalMb} MB total (${pct}% utilisé)`;
+        el('disk-usage-text').style.color = d.freeMb < 80 ? '#c0392b' : '#7d4a00';
+        el('disk-usage-detail').textContent = d.files.map(f => `${f.file} ${f.sizeMb} MB`).join(' · ') + ` · brochures ${d.brochuresMb} MB`;
+      }
+      el('brochures-upload-status').textContent = '';
+    } catch (e) {
+      el('brochures-upload-status').textContent = '❌ Erreur: ' + e.message;
+    }
+  }
+
+  async function purgerBrochures() {
+    if (!confirm('Supprimer tous les PDFs du serveur Railway ? Les liens brochures ne fonctionneront plus jusqu\'à un nouvel upload.')) return;
+    const token = el('brochures-token').value.trim();
+    el('brochures-upload-status').textContent = 'Suppression en cours…';
+    try {
+      const r = await fetch('/api/admin/brochures', { method: 'DELETE', headers: { 'x-admin-token': token } });
+      const d = await r.json();
+      el('brochures-upload-status').textContent = `✅ ${d.deleted} brochure(s) supprimée(s)`;
+      await loadBrochuresStatus();
+    } catch (e) { el('brochures-upload-status').textContent = '❌ ' + e.message; }
+  }
+
+  async function trimProcessed() {
+    if (!confirm('Archiver les anciens leads traités ? Les 500 plus récents seront conservés, le reste supprimé du fichier local. Les données restent visibles dans le dashboard pendant cette session.')) return;
+    const token = el('brochures-token').value.trim();
+    el('brochures-upload-status').textContent = 'Archivage en cours…';
+    try {
+      const r = await fetch('/api/admin/trim-processed?keep=500', { method: 'POST', headers: { 'x-admin-token': token } });
+      const d = await r.json();
+      el('brochures-upload-status').textContent = `✅ ${d.removed} entrées supprimées — ${d.after} conservées`;
+      await loadBrochuresStatus();
+    } catch (e) { el('brochures-upload-status').textContent = '❌ ' + e.message; }
+  }
+
+  function renderBrochuresList() {
+    const present = _brochuresList.filter(b => b.present).length;
+    el('brochures-count').textContent = `${present}/${_brochuresList.length} uploadés`;
+    el('brochures-list').innerHTML = _brochuresList.map((b, i) => `
+      <div id="brochure-row-${i}" style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:${b.present ? '#e8f7ee' : '#fff7f0'};border-radius:6px;font-size:12px;border:1px solid ${b.present ? '#c3e6cb' : '#ffe0cc'};">
+        <span style="font-size:14px;flex-shrink:0;">${b.present ? '✅' : '📂'}</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.name)}</div>
+          <div style="color:#6e6e73;font-size:11px;">${esc(b.slug)}</div>
+        </div>
+        ${b.present
+          ? `<a href="/brochures/${esc(b.slug)}" target="_blank" style="font-size:11px;color:#0070f3;flex-shrink:0;white-space:nowrap;">Voir ↗</a>`
+          : `<button onclick="pickBrochureFile(${i})" style="padding:4px 10px;background:#1a3a5c;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap;">Uploader</button>`
+        }
+      </div>`).join('');
+  }
+
+  function pickBrochureFile(idx) {
+    const fileInput = el('brochures-file-hidden');
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      fileInput.value = '';
+      await uploadBrochureForRow(idx, file);
+    };
+    fileInput.click();
+  }
+
+  async function uploadBrochureForRow(idx, file) {
+    const token = el('brochures-token').value.trim();
+    const brochure = _brochuresList[idx];
+    const row = el(`brochure-row-${idx}`);
+    if (row) row.style.opacity = '0.5';
+    el('brochures-upload-status').textContent = `Upload "${brochure.slug}"…`;
+    try {
+      const r = await fetch(`/api/admin/upload-brochure?filename=${encodeURIComponent(brochure.slug)}`, {
+        method: 'POST',
+        headers: { 'x-admin-token': token, 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      if (r.ok) {
+        el('brochures-upload-status').textContent = `✅ "${brochure.name}" uploadé`;
+        _brochuresList[idx].present = true;
+        renderBrochuresList();
+      } else {
+        const txt = await r.text();
+        el('brochures-upload-status').textContent = `❌ Erreur ${r.status}: ${txt}`;
+        if (row) row.style.opacity = '1';
+      }
+    } catch (e) {
+      el('brochures-upload-status').textContent = `❌ Erreur réseau: ${e.message}`;
+      if (row) row.style.opacity = '1';
+    }
+  }
 </script>
 </body>
 </html>
