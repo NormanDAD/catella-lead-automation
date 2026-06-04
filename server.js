@@ -800,10 +800,13 @@ async function createRelanceSalesAction(programId, leadId) {
 // event : voir enum complet dans docs.adlead.immo/v1/records.html
 // Non bloquant — toujours appeler dans un try/catch.
 async function createAdleadRecord(programId, leadId, event, comment) {
+  // occurred_at en heure Paris (Adlead affiche sans conversion timezone)
+  const now = new Date();
+  const parisStr = now.toLocaleString('sv-SE', { timeZone: 'Europe/Paris' }).replace(' ', 'T');
   return adleadPost(`/programs/${programId}/leads/${leadId}/records`, {
     event,
     comment: comment || null,
-    occurred_at: new Date().toISOString(),
+    occurred_at: parisStr,
   });
 }
 
