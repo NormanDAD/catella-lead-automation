@@ -1520,9 +1520,24 @@
     <div class="panel-header">
       <div>
         <div class="panel-title">Activité récente</div>
-        <div class="panel-subtitle">20 derniers leads traités · emails anonymisés</div>
+        <div class="panel-subtitle" id="feed-subtitle">20 derniers leads traités · emails anonymisés</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="search-input" placeholder="Rechercher email, nom, ID…"
+          style="padding:7px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;width:240px;outline:none;background:var(--bg);color:var(--text);"
+          onkeydown="if(event.key==='Enter') searchLeads()"
+          oninput="if(!this.value.trim()) clearSearch()">
+        <button onclick="searchLeads()"
+          style="padding:7px 14px;background:var(--catella-red);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">
+          Chercher
+        </button>
+        <button id="search-clear-btn" onclick="clearSearch()"
+          style="display:none;padding:7px 12px;background:var(--border);color:var(--text);border:none;border-radius:8px;font-size:13px;cursor:pointer;">
+          ✕
+        </button>
       </div>
     </div>
+    <div id="search-results" style="display:none;"></div>
     <div class="feed" id="feed">
       <div style="color: var(--text-dim); font-size: 13px;">Chargement…</div>
     </div>
@@ -2794,6 +2809,95 @@
       if (row) row.style.opacity = '1';
     }
   }
+
+  // ── Recherche leads ───────────────────────────────────────────────────────
+
+  let _searchActive = false;
+
+  async function searchLeads() {
+    const q = (el('search-input').value || '').trim();
+    if (!q || q.length < 2) return;
+    _searchActive = true;
+    const container = el('search-results');
+    const feedDiv = el('feed');
+    container.style.display = 'block';
+    feedDiv.style.display = 'none';
+    el('search-clear-btn').style.display = '';
+    el('feed-subtitle').textContent = `Résultats pour "${q}"`;
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:12px 0;">Recherche…</div>';
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { cache: 'no-store' });
+      const data = await res.json();
+      const results = data.results || [];
+      if (results.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:12px 0;">Aucun lead trouvé.</div>';
+        return;
+      }
+      container.innerHTML = results.map(r => {
+        const rawStatus = r.status || 'pending';
+        const displayStatus = r.failClosed ? 'failclosed' : rawStatus;
+        const displayLabel = r.failClosed ? 'à traiter' : rawStatus;
+        const when = r.processed_at || r.created_at;
+        const prog = esc(r.program || '—');
+        const nameHtml = r.contactName ? `<span style="font-weight:500;">${esc(r.contactName)}</span> · ` : '';
+        const waBadge = r.whatsapp === 'sent'
+          ? ' · <span style="color:#25D366;font-weight:600;">WhatsApp ✓</span>'
+          : r.whatsapp === 'error'
+            ? ' · <span style="color:var(--catella-red);font-weight:600;">WhatsApp ✗</span>'
+            : '';
+        const telHtml = r.whatsappTo
+          ? ` · <a href="tel:${esc(r.whatsappTo)}" style="color:var(--blue);text-decoration:none;font-size:12px;">${esc(r.whatsappTo)}</a>`
+          : '';
+        const relances = [];
+        if (r.j3mRelances > 0) relances.push(`J+3 ×${r.j3mRelances}`);
+        if (r.j15Relances > 0) relances.push(`J+15 ×${r.j15Relances}`);
+        const relanceHtml = relances.length ? `<div class="feed-reason" style="color:var(--blue);">Relances : ${relances.join(' · ')}</div>` : '';
+        const reasonHtml = r.reason ? `<div class="feed-reason">${esc(r.reason)}</div>` : '';
+        let actionsHtml = '';
+        if (r.leadId && r.programId) {
+          const adUrl = adleadUrl(r.programId, r.leadId);
+          const adLink = adUrl ? `<a href="${adUrl}" target="_blank" rel="noopener" class="feed-btn">↗ Adlead</a>` : '';
+          if (r.failClosed) {
+            actionsHtml = `<div class="feed-actions"><button class="feed-btn primary" onclick="processNow(${r.leadId},${r.programId},${r.interestId||'null'},this)">Forcer l'envoi</button>${adLink}</div>`;
+          } else if (rawStatus !== 'sent') {
+            actionsHtml = `<div class="feed-actions"><button class="feed-btn" onclick="processNow(${r.leadId},${r.programId},${r.interestId||'null'},this)">Retraiter</button>${adLink}</div>`;
+          } else {
+            actionsHtml = `<div class="feed-actions">${adLink}</div>`;
+          }
+        }
+        return `
+          <div class="feed-item">
+            <div class="feed-dot ${rawStatus}"></div>
+            <div class="feed-content">
+              <div class="feed-main">
+                <div class="feed-email">${nameHtml}${esc(r.email || '—')}</div>
+                <div class="feed-time">${timeAgo(when)}</div>
+              </div>
+              <div class="feed-meta">
+                <span class="feed-status ${displayStatus}">${displayLabel}</span>
+                · ${prog}${waBadge}${telHtml}
+              </div>
+              ${relanceHtml}${reasonHtml}${actionsHtml}
+            </div>
+          </div>`;
+      }).join('');
+      container.insertAdjacentHTML('afterbegin',
+        `<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">${results.length} résultat${results.length > 1 ? 's' : ''}</div>`);
+    } catch (e) {
+      container.innerHTML = `<div style="color:var(--catella-red);font-size:13px;">Erreur : ${esc(e.message)}</div>`;
+    }
+  }
+
+  function clearSearch() {
+    _searchActive = false;
+    el('search-input').value = '';
+    el('search-results').style.display = 'none';
+    el('search-results').innerHTML = '';
+    el('feed').style.display = '';
+    el('search-clear-btn').style.display = 'none';
+    el('feed-subtitle').textContent = '20 derniers leads traités · emails anonymisés';
+  }
+
 </script>
 </body>
 </html>

@@ -2180,6 +2180,44 @@ app.get('/api/leads', (req, res) => {
   res.json(enriched);
 });
 
+app.get('/api/search', (req, res) => {
+  const q = (req.query.q || '').trim().toLowerCase();
+  if (!q || q.length < 2) return res.json({ results: [] });
+  const BAD = /^Programme #\d+$/;
+  const match = r =>
+    (r.email || '').toLowerCase().includes(q) ||
+    (r.contactName || '').toLowerCase().includes(q) ||
+    String(r.leadId || '') === q;
+  const format = (l, source) => {
+    const needsResolve = !l.programName || BAD.test(l.programName);
+    const programName = needsResolve ? (programNameCache.get(String(l.programId)) || l.programName || '') : l.programName;
+    return {
+      id: l.id, leadId: l.leadId, programId: l.programId,
+      interestId: l.interestId || l.id,
+      status: l.status || 'pending',
+      email: l.email || '',
+      contactName: l.contactName || '',
+      program: programName,
+      reason: l.status === 'sent' ? null : (l.reason || l.error || '').slice(0, 200),
+      failClosed: !!l.registrationsFailClosed,
+      processed_at: l.processedAt, created_at: l.createdAt || l.receivedAt,
+      whatsapp: l.whatsappEnabled
+        ? (l.whatsappSid && !l.whatsappError ? 'sent' : (l.whatsappError ? 'error' : 'skipped'))
+        : null,
+      whatsappTo: l.whatsappTo || null,
+      j3mRelances: l.j3mRelances || 0,
+      j15Relances: l.j15Relances || 0,
+      source,
+    };
+  };
+  const fromProcessed = processedLeads.filter(match).map(l => format(l, 'processed'));
+  const fromPending = pendingLeads.filter(match).map(l => format(l, 'pending'));
+  const results = [...fromProcessed, ...fromPending]
+    .sort((a, b) => new Date(b.processed_at || b.created_at || 0) - new Date(a.processed_at || a.created_at || 0))
+    .slice(0, 50);
+  res.json({ results });
+});
+
 // Leads ayant déjà reçu au moins une relance J+3
 app.get('/api/j3m/relanced', (req, res) => {
   const BAD = /^Programme #\d+$/;
