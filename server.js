@@ -2132,7 +2132,27 @@ app.get('/api/health', (req, res) => {
       j3mTemplateDay2Configured: !!CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
       j1AutoSendDisabled: CONFIG.J1_AUTO_SEND_DISABLED,
       j16TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_J16,
+      // J+1 WhatsApp
+      j1WhatsappEnabled: CONFIG.WHATSAPP_ENABLED,
+      j1TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
+      twilioConfigured: !!(CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN && CONFIG.TWILIO_WHATSAPP_FROM),
     },
+    whatsappDiag: (() => {
+      const waLeads = processedLeads.filter(l => l.whatsappEnabled);
+      const errors  = waLeads.filter(l => l.whatsappError).slice(-20);
+      const sent    = waLeads.filter(l => l.whatsappSid && !l.whatsappError);
+      const lastSent   = sent.length   ? sent[sent.length - 1].processedAt   : null;
+      const lastError  = errors.length ? errors[errors.length - 1].processedAt : null;
+      const errorMessages = [...new Set(errors.map(l => l.whatsappError).filter(Boolean))].slice(0, 5);
+      return {
+        totalAttempted: waLeads.length,
+        totalSent: sent.length,
+        totalErrors: waLeads.filter(l => l.whatsappError).length,
+        lastSentAt: lastSent,
+        lastErrorAt: lastError,
+        recentErrorMessages: errorMessages,
+      };
+    })(),
     persistence: {
       dataDir: DATA_DIR,
       dataDirFromEnv: !!process.env.DATA_DIR,
