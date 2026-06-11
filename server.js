@@ -3252,6 +3252,70 @@ app.post('/api/admin/enrich-wa-records', (req, res) => {
   res.json({ ok: true, updated: updatedRecords });
 });
 
+// ─── RETRY WHATSAPP FAILED (401 errors depuis une date) ─────────────────────
+// Retrouve tous les leads J+1 avec whatsappEnabled=true, whatsappSid=null,
+// whatsappError contenant '401' ou 'Authenticate', processedAt >= since.
+// Pour chacun : fetchLead → skip si lead.status !== 'pending' → envoie WA J+1.
+// Met à jour whatsappSid / whatsappError sur le record.
+app.post('/api/admin/retry-whatsapp-failed', async (req, res) => {
+  const token = req.headers['x-admin-token'] || '';
+  if (!CONFIG.ADMIN_UPLOAD_TOKEN || token !== CONFIG.ADMIN_UPLOAD_TOKEN)
+    return res.status(401).json({ error: 'unauthorized' });
+
+  const since = req.body?.since || '2026-06-04T00:00:00.000Z';
+  const dryRun = req.body?.dryRun === true;
+  const sinceMs = new Date(since).getTime();
+
+  const candidates = processedLeads.filter(l =>
+    l.whatsappEnabled &&
+    !l.whatsappSid &&
+    l.whatsappTo &&
+    (l.whatsappError || '').match(/401|Authenticate/i) &&
+    new Date(l.processedAt || 0).getTime() >= sinceMs
+  );
+
+  const results = [];
+  let sent = 0, skipped = 0, errors = 0;
+
+  for (const record of candidates) {
+    await new Promise(r => setTimeout(r, 800)); // throttle Adlead + Twilio
+    try {
+      const lead = await fetchLead(record.programId, record.leadId);
+      if (!lead || lead.status !== 'pending') {
+        skipped++;
+        results.push({ leadId: record.leadId, result: 'skipped', reason: `lead.status=${lead?.status || 'inconnu'}` });
+        continue;
+      }
+      if (dryRun) {
+        sent++;
+        results.push({ leadId: record.leadId, result: 'dry-run', phone: record.whatsappTo, program: record.programName });
+        continue;
+      }
+      const firstName = splitName(record.contactName || '').firstname || '';
+      const brochureUrl = getBrochureUrl(record.programName);
+      const resp = await sendWhatsAppViaTwilio(record.whatsappTo, '', {
+        templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
+        contentVariables: {
+          '1': firstName || 'bonjour',
+          '2': record.programName || 'votre projet',
+          ...(brochureUrl ? { '3': brochureUrl } : {}),
+        },
+      });
+      record.whatsappSid = resp.sid || null;
+      record.whatsappError = null;
+      sent++;
+      results.push({ leadId: record.leadId, result: 'sent', sid: resp.sid, phone: record.whatsappTo });
+    } catch (e) {
+      errors++;
+      results.push({ leadId: record.leadId, result: 'error', error: e.message.slice(0, 120) });
+    }
+  }
+
+  if (!dryRun && sent > 0) saveProcessed();
+  console.log(`[retry-wa] since=${since} dryRun=${dryRun} — ${sent} envoyés, ${skipped} skippés, ${errors} erreurs`);
+  res.json({ ok: true, dryRun, since, total: candidates.length, sent, skipped, errors, results });
+});
+
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
 // le rapport du scanner scanLeadForDenouncedSignals() (champs suspects trouvés).
 app.get('/api/test/lead-dump', async (req, res) => {
