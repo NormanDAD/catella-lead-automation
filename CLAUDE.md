@@ -123,7 +123,7 @@ Liste complète : `README.md` section "Endpoints".
 3. **Webhook `/webhook/inbox-reply` retourne `matched: 'true'/'false'` en STRING** (pas booléen) — compat condition Power Automate.
 4. **Reply Watcher passe par Power Automate**, pas par Graph direct. Raison : la Conditional Access policy de Catella bloque l'auth Graph depuis l'IP serveur Railway (le serveur n'est pas un device Catella enregistré). Voir `POWER_AUTOMATE_INBOX_SECRET`.
 5. **`PATCH /leads/{id}` côté Adlead n'existe pas encore** (annoncé été 2026 par Cédric). Le code tente quand même, récupère 405 silencieusement. `STATUS_UPDATE_ENABLED=true` par défaut, mettre à `false` si les logs polluent.
-6. **Sales-action Adlead renvoie 500** — connu, ignoré. Remplacé par pose de tag (qui marche, gated par `TAG_UUID_RELANCE_J1`).
+6. **Sales-action Adlead fonctionne** — endpoint `POST /sales-actions` corrigé par Cédric (retourne 200 + id). La pipeline J+1 pose automatiquement une action commerciale dans le suivi Adlead après chaque envoi. Tag `TAG_UUID_RELANCE_J1` également posé en parallèle.
 7. **Dry-run J+15 envoyait pour de vrai** avant le commit `63bcedf` du 13 mai — d'où `J15_SEND_DISABLED` belt-and-suspenders. Toujours vérifier que les "dry-run" sont vraiment dry.
 8. **`/api/stats` `today` ≠ `byDay[aujourd'hui]`** — fuseaux horaires différents quelque part. Vérifier les deux.
 

@@ -1910,8 +1910,8 @@ async function processPendingLead(entry) {
       console.error(`[process] ⚠️ échec notif interne lead ${entry.leadId}: ${e.message}`);
     }
 
-    // ── Best-effort sales-action Adlead (si un jour l'API se débloque, on aura la trace
-    //    auto en bonus — pour l'instant ça échoue en 500 mais c'est silencieux et non bloquant).
+    // ── Sales-action Adlead — fonctionnel depuis le fix Cédric (retourne 200 + id).
+    //    Trace l'envoi dans le suivi commercial du lead côté CRM.
     let adleadActionError = null;
     try {
       await createRelanceSalesAction(entry.programId, entry.leadId);
