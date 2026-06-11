@@ -1424,6 +1424,8 @@ async function schedulerTick() {
     for (const entry of due) {
       await processPendingLead(entry);
     }
+    // Surveillance erreurs WhatsApp après chaque batch
+    checkWhatsAppErrorSpike().catch(e => console.error('[wa-monitor] erreur:', e.message));
   } catch (e) {
     console.error('[scheduler] erreur globale:', e.message);
   } finally {
@@ -5296,6 +5298,66 @@ async function inboxSchedulerTick() {
 setInterval(inboxSchedulerTick, CONFIG.REPLY_POLL_INTERVAL_MS);
 // Pas de tick initial — on attend que Norman ait fait l'auth.
 
+// ─── TWILIO BALANCE CHECK ───────────────────────────────────────────────────
+async function getTwilioBalance() {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) return null;
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const r = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Balance.json`,
+    { headers: { Authorization: `Basic ${auth}` } }
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json(); // { balance: "12.34", currency: "USD" }
+}
+
+// ─── SURVEILLANCE WHATSAPP TEMPS RÉEL ───────────────────────────────────────
+// Déclenche une alerte email si les 5 derniers envois WhatsApp ont tous échoué.
+// Cooldown 6h pour éviter le spam.
+
+const WA_MONITOR_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let waMonitorLastAlertAt = 0;
+
+async function checkWhatsAppErrorSpike() {
+  if (!CONFIG.POWER_AUTOMATE_URL || !CONFIG.WHATSAPP_ENABLED) return;
+  const waLeads = processedLeads.filter(l => l.whatsappEnabled);
+  if (waLeads.length < 5) return;
+  const last5 = waLeads.slice(-5);
+  const allFailed = last5.every(l => l.whatsappError && !l.whatsappSid);
+  if (!allFailed) return;
+  const now = Date.now();
+  if (now - waMonitorLastAlertAt < WA_MONITOR_COOLDOWN_MS) return;
+  waMonitorLastAlertAt = now;
+  const lastErr = last5[last5.length - 1].whatsappError || '(inconnu)';
+  const lastErrAt = new Date(last5[last5.length - 1].processedAt || now).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+  let balanceLine = '';
+  try {
+    const bal = await getTwilioBalance();
+    if (bal) balanceLine = `<li><strong>Solde Twilio</strong> : ${bal.balance} ${bal.currency}</li>`;
+  } catch (_) {}
+  const subject = `⚠️ [Catella Pipeline] WhatsApp — 5 erreurs consécutives`;
+  const html = `<div style="font-family:sans-serif;max-width:600px">
+<h2 style="color:#C8102E">⚠️ WhatsApp : 5 envois consécutifs en erreur</h2>
+<p>Le pipeline détecte une panne WhatsApp depuis <strong>${lastErrAt}</strong>.</p>
+<ul>
+  <li><strong>Dernière erreur</strong> : ${lastErr}</li>
+  ${balanceLine}
+</ul>
+<p><strong>Actions à faire :</strong></p>
+<ul>
+  <li>Si erreur 401 (Twilio 20003) → vérifier / renouveler le <strong>Auth Token</strong> dans Railway</li>
+  <li>Si solde insuffisant → <strong>recharger le compte Twilio</strong></li>
+  <li>Si erreur 63016 → template Meta expiré ou rejeté → vérifier dans Twilio Console → Content Templates</li>
+</ul>
+<p><a href="https://lead-automation-production-33e8.up.railway.app">Ouvrir le dashboard</a></p>
+</div>`;
+  try {
+    await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, subject, html);
+    console.log('[wa-monitor] ⚠️ alerte WhatsApp envoyée — dernière erreur :', lastErr.slice(0, 80));
+  } catch (e) {
+    console.error('[wa-monitor] échec alerte email:', e.message);
+  }
+}
+
 // ─── SLACK NOTIFICATIONS ────────────────────────────────────────────────────
 async function sendSlackNotification(blocks) {
   if (!CONFIG.SLACK_WEBHOOK_URL) {
@@ -5449,7 +5511,41 @@ async function runDailyHealthCheck() {
     }],
   });
 
+  // ── 5. Solde Twilio ────────────────────────────────────────────────────────
+  try {
+    const bal = await getTwilioBalance();
+    if (bal) {
+      const amount = parseFloat(bal.balance);
+      checks.twilioBalance = `${bal.balance} ${bal.currency}`;
+      if (amount < 5) {
+        issues.push(`Solde Twilio faible : ${bal.balance} ${bal.currency} — recharger le compte`);
+      }
+    }
+  } catch (e) {
+    checks.twilioBalance = `⚠️ impossible de vérifier (${e.message})`;
+  }
+
+  // ── 6. Envoi email si problèmes détectés (fallback Slack) ─────────────────
   const slackOk = await sendSlackNotification(blocks);
+  if (!allGood && CONFIG.POWER_AUTOMATE_URL) {
+    const issueList = issues.map(i => `<li>${i}</li>`).join('');
+    const checksHtml = Object.entries(checks).map(([k, v]) => `<li><strong>${k}</strong> : ${v}</li>`).join('');
+    const emailSubject = `⚠️ [Catella Pipeline] ${issues.length} problème(s) détecté(s) — ${dateStr}`;
+    const emailHtml = `<div style="font-family:sans-serif;max-width:600px">
+<h2 style="color:#C8102E">⚠️ Health check quotidien — problèmes détectés</h2>
+<p><strong>Date :</strong> ${dateStr}</p>
+<h3>Problèmes :</h3><ul>${issueList}</ul>
+<h3>État détaillé :</h3><ul>${checksHtml}</ul>
+<p><a href="https://lead-automation-production-33e8.up.railway.app">Ouvrir le dashboard</a></p>
+</div>`;
+    try {
+      await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, emailSubject, emailHtml);
+      console.log(`[daily-health] email d'alerte envoyé (${issues.length} problème(s))`);
+    } catch (e) {
+      console.error('[daily-health] échec email alerte:', e.message);
+    }
+  }
+
   console.log(`[daily-health] ${statusText} — Slack: ${slackOk ? 'envoyé' : 'échec/désactivé'} — issues: [${issues.join(', ') || 'aucun'}]`);
   return { allGood, issues, checks };
 }
