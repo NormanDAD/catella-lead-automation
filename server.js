@@ -3274,46 +3274,62 @@ app.post('/api/admin/retry-whatsapp-failed', async (req, res) => {
     new Date(l.processedAt || 0).getTime() >= sinceMs
   );
 
-  const results = [];
-  let sent = 0, skipped = 0, errors = 0;
-
-  for (const record of candidates) {
-    await new Promise(r => setTimeout(r, 800)); // throttle Adlead + Twilio
-    try {
-      const lead = await fetchLead(record.programId, record.leadId);
-      if (!lead || lead.status !== 'pending') {
-        skipped++;
-        results.push({ leadId: record.leadId, result: 'skipped', reason: `lead.status=${lead?.status || 'inconnu'}` });
-        continue;
-      }
-      if (dryRun) {
-        sent++;
-        results.push({ leadId: record.leadId, result: 'dry-run', phone: record.whatsappTo, program: record.programName });
-        continue;
-      }
-      const firstName = splitName(record.contactName || '').firstname || '';
-      const brochureUrl = getBrochureUrl(record.programName);
-      const resp = await sendWhatsAppViaTwilio(record.whatsappTo, '', {
-        templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
-        contentVariables: {
-          '1': firstName || 'bonjour',
-          '2': record.programName || 'votre projet',
-          ...(brochureUrl ? { '3': brochureUrl } : {}),
-        },
-      });
-      record.whatsappSid = resp.sid || null;
-      record.whatsappError = null;
-      sent++;
-      results.push({ leadId: record.leadId, result: 'sent', sid: resp.sid, phone: record.whatsappTo });
-    } catch (e) {
-      errors++;
-      results.push({ leadId: record.leadId, result: 'error', error: e.message.slice(0, 120) });
-    }
+  // Dry-run : liste les candidats sans appeler Adlead ni Twilio
+  if (dryRun) {
+    const preview = candidates.map(r => ({
+      leadId: r.leadId,
+      program: r.programName,
+      phone: r.whatsappTo,
+      processedAt: r.processedAt,
+      error: r.whatsappError,
+    }));
+    return res.json({ ok: true, dryRun: true, since, total: candidates.length, preview });
   }
 
-  if (!dryRun && sent > 0) saveProcessed();
-  console.log(`[retry-wa] since=${since} dryRun=${dryRun} — ${sent} envoyés, ${skipped} skippés, ${errors} erreurs`);
-  res.json({ ok: true, dryRun, since, total: candidates.length, sent, skipped, errors, results });
+  // Envoi réel : fire-and-forget → retourne immédiatement, traite en arrière-plan
+  res.json({ ok: true, dryRun: false, since, total: candidates.length, message: `Traitement de ${candidates.length} leads en arrière-plan — résumé par email à la fin.` });
+
+  // Traitement asynchrone
+  (async () => {
+    let sent = 0, skipped = 0, errors = 0;
+    const results = [];
+    for (const record of candidates) {
+      await new Promise(r => setTimeout(r, 600));
+      try {
+        const lead = await fetchLead(record.programId, record.leadId);
+        if (!lead || lead.status !== 'pending') {
+          skipped++;
+          results.push({ leadId: record.leadId, result: 'skipped', reason: `lead.status=${lead?.status || 'inconnu'}` });
+          continue;
+        }
+        const firstName = splitName(record.contactName || '').firstname || '';
+        const brochureUrl = getBrochureUrl(record.programName);
+        const resp = await sendWhatsAppViaTwilio(record.whatsappTo, '', {
+          templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
+          contentVariables: {
+            '1': firstName || 'bonjour',
+            '2': record.programName || 'votre projet',
+            ...(brochureUrl ? { '3': brochureUrl } : {}),
+          },
+        });
+        record.whatsappSid = resp.sid || null;
+        record.whatsappError = null;
+        sent++;
+        results.push({ leadId: record.leadId, result: 'sent', sid: resp.sid });
+      } catch (e) {
+        errors++;
+        results.push({ leadId: record.leadId, result: 'error', error: e.message.slice(0, 120) });
+      }
+    }
+    if (sent > 0) saveProcessed();
+    console.log(`[retry-wa] TERMINÉ — ${sent} envoyés, ${skipped} skippés, ${errors} erreurs`);
+    // Rapport email
+    if (CONFIG.POWER_AUTOMATE_URL) {
+      const rows = results.map(r => `<tr><td style="padding:4px 8px">${r.leadId}</td><td style="padding:4px 8px">${r.result}</td><td style="padding:4px 8px">${r.sid||r.reason||r.error||''}</td></tr>`).join('');
+      const html = `<div style="font-family:sans-serif"><h2>Retry WhatsApp — résumé</h2><p><strong>${sent}</strong> envoyés · <strong>${skipped}</strong> skippés · <strong>${errors}</strong> erreurs</p><table border="1" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:12px"><thead><tr><th style="padding:4px 8px">leadId</th><th>résultat</th><th>détail</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, `[Catella] Retry WA — ${sent}/${candidates.length} envoyés`, html).catch(() => {});
+    }
+  })().catch(e => console.error('[retry-wa] erreur fatale:', e.message));
 });
 
 // Renvoie le JSON brut + la liste exhaustive des clés (top-level + nested) +
