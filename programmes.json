@@ -279,14 +279,6 @@
     "promoteur": "AZUR REALISATION",
     "accroche": "À Nice, Les Hauts de Besset par AZUR REALISATION offrent vues mer et orientations soignées sur les hauteurs niçoises — un écrin résidentiel d'exception."
   },
-  "Démarrage des travaux Les Jardins de Gaïa": {
-    "nom_commercial": "Les Jardins de Gaïa",
-    "ville": "Achères",
-    "code_postal": "78260",
-    "departement": "78",
-    "promoteur": "FAYAT IMMOBILIER IdF",
-    "accroche": "À Achères, Les Jardins de Gaïa par FAYAT IMMOBILIER Île-de-France viennent de démarrer : une résidence à l'architecture végétalisée, dans un secteur en pleine mutation."
-  },
   "Les Jardins de Gaïa": {
     "nom_commercial": "Les Jardins de Gaïa",
     "ville": "Achères",
@@ -326,14 +318,6 @@
     "departement": "94",
     "promoteur": "AIC",
     "accroche": "À Gentilly, Les Terrasses de la Bièvre – version BRS (Bail Réel Solidaire) par AIC permettent d'accéder à la propriété à des conditions très attractives."
-  },
-  "En cours de commercialisation MAGNOLIA": {
-    "nom_commercial": "MAGNOLIA",
-    "ville": "Mérignac",
-    "code_postal": "33700",
-    "departement": "33",
-    "promoteur": "CATELLA",
-    "accroche": "À Mérignac, MAGNOLIA par CATELLA est en commercialisation active : une résidence pensée pour la douceur de vivre bordelaise, à proximité du tramway."
   },
   "MAGNOLIA": {
     "nom_commercial": "MAGNOLIA",
@@ -462,14 +446,6 @@
     "departement": "6",
     "promoteur": "AZUR REALISATION",
     "accroche": "À Nice, Villa Gabriel par AZUR REALISATION incarne l'élégance méditerranéenne : adresse confidentielle, prestations soignées, orientation plein soleil."
-  },
-  "Démarrage des travaux Villa Gallieni": {
-    "nom_commercial": "Villa Gallieni",
-    "ville": "Asnières-sur-Seine",
-    "code_postal": "92600",
-    "departement": "92",
-    "promoteur": "Proderim",
-    "accroche": "À Asnières-sur-Seine, Villa Gallieni par Proderim entre en phase travaux : une adresse résidentielle intimiste à quelques pas du Parc Robinson."
   },
   "Villa Gallieni": {
     "nom_commercial": "Villa Gallieni",

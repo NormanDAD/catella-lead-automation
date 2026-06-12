@@ -683,6 +683,100 @@ async function draftResponse({ category, classification, replyBody, replySubject
   }
 }
 
+// ─── AGENT WHATSAPP — RÉPONSE AUTO CONTEXTUELLE ───────────────────────────
+// Agent dédié qui répond directement au prospect en WhatsApp, dans le contexte
+// du message reçu et du dossier (programme/ville/promoteur/accroche/brochure).
+// Contrairement au flow email (brouillon Outlook relu par Norman), ce texte
+// PEUT partir automatiquement — d'où les garde-fous renforcés ci-dessous.
+const WHATSAPP_REPLY_PROMPT = `Tu es l'assistant commercial de Norman Dadon, Directeur des ventes chez Catella Residential (commercialisation de logements neufs). Tu réponds À SA PLACE, en son nom, aux messages WhatsApp de prospects immobiliers.
+
+Ta réponse est envoyée DIRECTEMENT au prospect par WhatsApp (pas de relecture humaine). Sois donc irréprochable et prudent.
+
+TON NORMAN (impératif) :
+- Direct, chaleureux, professionnel. Jamais robotique ni obséquieux.
+- Vouvoiement systématique.
+- Style WhatsApp : court et naturel. 1 à 3 phrases maximum. Pas de pavé.
+- Pas de formules creuses ("N'hésitez pas", "Je reste à votre disposition").
+- Pas d'emojis. Pas de markdown, pas de HTML — texte brut uniquement.
+- Pas de salutation lourde type "Cher Monsieur". Un simple "Bonjour {prénom/nom fourni}," suffit, ou rien si la conversation est déjà engagée.
+- Tu peux terminer par "— Norman" mais pas de bloc signature.
+
+RÈGLES CRITIQUES — NE JAMAIS LES VIOLER (un message client réel part automatiquement) :
+- N'INVENTE JAMAIS : prix d'un lot, date exacte de livraison, disponibilité précise, typologie/étage/orientation/parking d'un lot, surface précise, TVA, dispositif fiscal (Pinel/LMNP), frais de notaire, rentabilité, montant de loyer.
+- Si le prospect demande du CONCRET (prix, dispo, plan d'un lot, date de livraison, simulation fiscale…) → NE DONNE PAS de chiffre. Réponds qu'on regarde ça ensemble lors d'un échange rapide et propose le lien de RDV.
+- Si négociation prix → ni concession ni refus sec : propose un échange de vive voix.
+- Tu peux donner les infos GÉNÉRALES déjà fournies dans le contexte programme ci-dessous (nom, ville, promoteur, accroche) et partager le lien brochure s'il existe et que c'est pertinent.
+- Si le prospect demande une brochure / des plans / "plus d'infos" → partage le lien brochure s'il est fourni, sinon propose un RDV.
+- En cas de doute sur une info, ne l'affirme pas : propose le RDV.
+
+CAS shouldReply = false (on NE répond PAS automatiquement, on laisse Norman gérer) :
+- Désinscription / STOP / "arrêtez de me contacter" → shouldReply=false (note : Norman doit traiter le opt-out).
+- Insulte, spam, message incompréhensible ou hors-sujet total.
+- Réclamation sérieuse, litige, sujet juridique ou sensible.
+- Demande qui exige une décision commerciale que seul Norman peut prendre.
+Dans ces cas, mets shouldReply=false et explique pourquoi dans internalNote.
+
+LIEN DE RDV (à insérer tel quel quand tu proposes un créneau) :
+{{BOOKING_URL}}
+
+FORMAT DE SORTIE — JSON strict, rien avant, rien après :
+{
+  "shouldReply": <true|false>,
+  "text": "<le message WhatsApp en texte brut, ou \\"\\" si shouldReply=false>",
+  "internalNote": "<1 phrase FR pour Norman : ce que l'agent a répondu et pourquoi, ou la raison du non-envoi>"
+}`;
+
+async function draftWhatsAppReply({ incomingBody, leadContext = {}, programContext = {}, history = [] }) {
+  const bookingUrl = CONFIG.BOOKING_URL || '';
+  const systemPrompt = WHATSAPP_REPLY_PROMPT.replaceAll('{{BOOKING_URL}}', bookingUrl);
+  const salutation = leadContext.salutation
+    || leadContext.contactName
+    || '(pas de nom — ne pas mettre de nom dans la salutation)';
+
+  const historyBlock = (history && history.length)
+    ? history.map(h => `${h.direction === 'out' ? 'Norman' : 'Prospect'} : ${String(h.body || '').slice(0, 400)}`).join('\n')
+    : '(aucun échange précédent)';
+
+  const userMsg = [
+    `=== Dossier / contexte programme ===`,
+    `Contact            : ${leadContext.contactName || '(inconnu)'}`,
+    `Salutation à employer : ${salutation}`,
+    `Programme          : ${programContext.name || leadContext.programName || '(inconnu)'}`,
+    `Ville              : ${programContext.ville || '(inconnue)'}`,
+    `Promoteur          : ${programContext.promoteur || '(inconnu)'}`,
+    `Accroche programme : ${programContext.accroche || '(aucune)'}`,
+    `Lien brochure      : ${programContext.brochureUrl || '(aucun)'}`,
+    ``,
+    `=== Historique de la conversation WhatsApp (du plus ancien au plus récent) ===`,
+    historyBlock,
+    ``,
+    `=== Dernier message du prospect (à traiter) ===`,
+    incomingBody || '(vide)',
+  ].join('\n');
+
+  const raw = await callClaude({
+    systemPrompt,
+    userMessage: userMsg,
+    maxTokens:   600,
+  });
+  try {
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      shouldReply:  !!parsed.shouldReply,
+      text:         (parsed.text || '').trim(),
+      internalNote: parsed.internalNote || '',
+    };
+  } catch (e) {
+    console.error(`[draftWhatsAppReply] parse error: ${e.message} — raw: ${raw.slice(0, 300)}`);
+    return {
+      shouldReply:  false,
+      text:         '',
+      internalNote: `Erreur parsing LLM: ${e.message} — aucune réponse auto envoyée, à traiter manuellement.`,
+    };
+  }
+}
+
 // ─── OUTLOOK — CRÉATION DU BROUILLON DANS LE THREAD ───────────────────────
 
 function wrapWithSignature(bodyHtml) {
@@ -964,6 +1058,7 @@ module.exports = {
   matchReplyToRelance,
   classifyReply,
   draftResponse,
+  draftWhatsAppReply,
   createDraftInOutlook,
   createAdleadReplySalesAction,
   wrapWithSignature,
