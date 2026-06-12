@@ -5859,6 +5859,7 @@ async function sendActivityDigest(windowHours = 3) {
 const DIGEST_HOURS = new Set([9, 12, 15, 18]);
 async function digestCron() {
   if (CONFIG.PIPELINE_DISABLED) return;
+  if (CONFIG.INTERNAL_NOTIF_DISABLED) return;
   if (!CONFIG.POWER_AUTOMATE_URL) return;
   const { ymd, hour } = getParisYmdAndHour();
   if (!DIGEST_HOURS.has(hour)) return;
