@@ -68,6 +68,8 @@ const CONFIG = {
   TWILIO_AUTH_TOKEN:     process.env.TWILIO_AUTH_TOKEN || '',
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
+  SMS_FALLBACK_ENABLED:  process.env.SMS_FALLBACK_ENABLED === 'true',
+  TWILIO_SMS_FROM:       process.env.TWILIO_SMS_FROM || 'Catella',
   // Agent WhatsApp : réponse auto contextuelle au prospect quand il répond en WhatsApp.
   // 100% automatique (le texte généré par Claude part directement). Gardé OFF par défaut :
   // mettre WHATSAPP_AUTO_REPLY_ENABLED=true dans Railway pour armer. Nécessite aussi
@@ -1340,6 +1342,44 @@ async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
   return await res.json();
 }
 
+async function sendSMSViaTwilio(toE164, body) {
+  if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) {
+    throw new Error('Credentials Twilio non configurés');
+  }
+  const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const params = new URLSearchParams();
+  params.append('From', CONFIG.TWILIO_SMS_FROM);
+  params.append('To', toE164);
+  params.append('Body', body);
+  const res = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json`,
+    { method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.toString() }
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Twilio SMS ${res.status}: ${err.slice(0, 200)}`);
+  }
+  return await res.json();
+}
+
+function isSMSFallbackEligible(whatsappError) {
+  if (!whatsappError) return false;
+  if (whatsappError === 'pas de téléphone sur le contact') return false;
+  if (whatsappError === 'optout téléphone/sms') return false;
+  if (/401|20003|Authenticate/i.test(whatsappError)) return false; // creds Twilio cassés
+  return true;
+}
+
+function buildSMSBody(ctx) {
+  const prenom = ctx.firstname ? `Bonjour ${ctx.firstname}` : 'Bonjour';
+  return `${prenom}, Norman Dadon - Catella Residential.\nVotre projet sur « ${ctx.programme} » m'intéresse. Je vous ai envoyé un email avec les détails.\nPrenez RDV : ${ctx.lien_rdv}`;
+}
+
+function buildSMSBodyRelance(ctx) {
+  const prenom = ctx.firstname ? `Bonjour ${ctx.firstname}` : 'Bonjour';
+  return `${prenom}, Norman Dadon - Catella Residential.\nToujours disponible pour votre projet sur « ${ctx.programme} ».\nPrenez RDV : ${ctx.lien_rdv}`;
+}
+
 function buildWhatsAppMessage(ctx) {
   const firstname = splitName(ctx.fullname || '').firstname || '';
   const hello = firstname ? `Bonjour ${firstname}` : 'Bonjour';
@@ -2015,6 +2055,21 @@ async function processPendingLead(entry) {
       }
     }
 
+    // ── Fallback SMS si WhatsApp a échoué pour une raison surmontable ─────────
+    let smsSid = null, smsError = null;
+    if (isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
+      try {
+        const firstname = splitName(contact.fullname || '').firstname || '';
+        const smsBody = buildSMSBody({ firstname, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+        const smsResp = await sendSMSViaTwilio(whatsappTo, smsBody);
+        smsSid = smsResp?.sid || null;
+        console.log(`[process] ✅ SMS fallback envoyé à ${whatsappTo} lead ${entry.leadId} (sid: ${smsSid})`);
+      } catch (e) {
+        smsError = e.message;
+        console.error(`[process] ⚠️ SMS fallback échec ${whatsappTo} lead ${entry.leadId}: ${e.message}`);
+      }
+    }
+
     return finalize({
       id: entry.interestId,
       status: 'sent',
@@ -2031,6 +2086,8 @@ async function processPendingLead(entry) {
       whatsappTo,
       whatsappSid,
       whatsappError,
+      smsSid,
+      smsError,
       tagPosted,
       tagError,
       statusUpdated,
@@ -4828,10 +4885,24 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     }
   }
 
+  // Fallback SMS J+15 jour 2
+  let smsSid = null, smsError = null;
+  if (channel === 'whatsapp' && isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
+    try {
+      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+      const r = await sendSMSViaTwilio(whatsappTo, smsBody);
+      smsSid = r?.sid || null;
+      console.log(`[j15] ✅ SMS fallback envoyé à ${whatsappTo} lead ${record.leadId}`);
+    } catch (e) {
+      smsError = e.message;
+      console.error(`[j15] ⚠️ SMS fallback échec lead ${record.leadId}: ${e.message}`);
+    }
+  }
+
   return {
     sent: true,
     dayNumber, channel, email, subject, whatsappTo,
-    emailError, whatsappSid, whatsappError,
+    emailError, whatsappSid, whatsappError, smsSid, smsError,
   };
 }
 
@@ -5239,10 +5310,24 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     }
   }
 
+  // Fallback SMS J+3 jour 2
+  let smsSid = null, smsError = null;
+  if (channel === 'whatsapp' && isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
+    try {
+      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+      const r = await sendSMSViaTwilio(whatsappTo, smsBody);
+      smsSid = r?.sid || null;
+      console.log(`[j3m] ✅ SMS fallback envoyé à ${whatsappTo} lead ${record.leadId}`);
+    } catch (e) {
+      smsError = e.message;
+      console.error(`[j3m] ⚠️ SMS fallback échec lead ${record.leadId}: ${e.message}`);
+    }
+  }
+
   return {
     sent: true,
     dayNumber, channel, email, subject, whatsappTo,
-    emailError, whatsappSid, whatsappError,
+    emailError, whatsappSid, whatsappError, smsSid, smsError,
   };
 }
 
