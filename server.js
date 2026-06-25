@@ -26,6 +26,13 @@ const CONFIG = {
   // "lead traité, pose une action Adlead" (sendInternalNotif), pas la classification
   // de la réponse. Passer à true si on veut ré-activer.
   REPLY_NOTIF_ENABLED:   process.env.REPLY_NOTIF_ENABLED === 'true',
+  // ── Telegram (canal urgent Norman) ─────────────────────────────────────────
+  // Bot @Catella_notif_bot. Norman est en déplacement permanent et ne consulte
+  // pas le dashboard → Telegram est son canal de notif principal.
+  // Activé par défaut ; TELEGRAM_NOTIF_ENABLED=false pour couper.
+  TELEGRAM_BOT_TOKEN:     process.env.TELEGRAM_BOT_TOKEN || '',
+  TELEGRAM_CHAT_ID:       process.env.TELEGRAM_CHAT_ID || '',
+  TELEGRAM_NOTIF_ENABLED: process.env.TELEGRAM_NOTIF_ENABLED !== 'false',
   ADLEAD_UI_BASE:        process.env.ADLEAD_UI_BASE || 'https://crm.adlead.immo/catella',
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
@@ -821,6 +828,39 @@ async function createAdleadRecord(programId, leadId, event, comment) {
 // un mail "à la main" avec le lien Adlead du lead à traiter manuellement.
 function buildAdleadLeadUrl(programId, leadId) {
   return `${CONFIG.ADLEAD_UI_BASE}/programs/${programId}/contact-management/leads/${leadId}`;
+}
+
+// Notif Telegram à Norman (canal urgent, bot @Catella_notif_bot). Best-effort :
+// ne throw jamais, retourne {ok}. Gated par TELEGRAM_NOTIF_ENABLED + token/chat_id.
+async function sendTelegram(text) {
+  if (!CONFIG.TELEGRAM_NOTIF_ENABLED) {
+    console.log('[telegram] DÉSACTIVÉ via TELEGRAM_NOTIF_ENABLED — skip');
+    return { ok: false, skipped: true };
+  }
+  if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
+    console.log('[telegram] (info) TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID non configuré — skip');
+    return { ok: false, skipped: true };
+  }
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: CONFIG.TELEGRAM_CHAT_ID,
+        text: String(text || '').slice(0, 4000), // limite Telegram = 4096 chars
+        disable_web_page_preview: true,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      console.error(`[telegram] ⚠️ échec (status=${resp.status}): ${JSON.stringify(data).slice(0, 200)}`);
+      return { ok: false, status: resp.status, data };
+    }
+    return { ok: true, messageId: data.result?.message_id };
+  } catch (e) {
+    console.error(`[telegram] ⚠️ erreur réseau: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
 }
 
 async function sendInternalNotif({ programId, leadId, contactName, contactEmail, programName }) {
@@ -2696,6 +2736,15 @@ app.post('/api/test/adlead-update', async (req, res) => {
   }
   const ok = !result.errors.notif; // sales-action erreur = normal (best-effort)
   res.status(ok ? 200 : 500).json(result);
+});
+
+// Endpoint de test : envoie un ping Telegram de test à Norman.
+// Usage : POST /api/test/telegram  (body/query optionnel : { text })
+app.post('/api/test/telegram', async (req, res) => {
+  const text = req.query.text || req.body?.text
+    || `🧪 Ping Telegram de test — ${new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}`;
+  const result = await sendTelegram(text);
+  res.status(result.ok ? 200 : 500).json(result);
 });
 
 // Endpoint de test : force le traitement immédiat d'un lead (bypass fenêtre 24h + queue + check commercial).
@@ -4618,6 +4667,23 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
         } catch (e) {
           console.error(`[webhook/whatsapp-incoming] ⚠️ WhatsApp Norman échec: ${e.message}`);
         }
+      }
+
+      // 5c. Telegram à Norman (canal urgent principal — il ne consulte pas le dashboard).
+      //     Envoyé à CHAQUE WhatsApp entrant, matché ou non.
+      const tgAutoReplyLine = autoReply
+        ? (autoReply.sent
+            ? `\n\n🤖 Réponse auto envoyée :\n"${String(autoReply.text).slice(0, 250)}${autoReply.text.length > 250 ? '…' : ''}"`
+            : `\n\n🤖 Pas de réponse auto (à traiter)${autoReply.error ? ` — erreur : ${autoReply.error}` : autoReply.note ? ` — ${autoReply.note}` : ''}`)
+        : '';
+      const tgBody = match
+        ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 500)}${body.length > 500 ? '…' : ''}"${tgAutoReplyLine}\n\n→ Adlead : ${adleadUrl}`
+        : `📱 WhatsApp inconnu ${profileName ? `(${profileName})` : ''} — ${fromE164}\n\nMessage :\n"${body.slice(0, 500)}${body.length > 500 ? '…' : ''}"\n\n(pas matché à un lead)`;
+      try {
+        const tg = await sendTelegram(tgBody);
+        if (tg.ok) console.log(`[webhook/whatsapp-incoming] ✅ Telegram Norman envoyé (msg ${tg.messageId})`);
+      } catch (e) {
+        console.error(`[webhook/whatsapp-incoming] ⚠️ Telegram Norman échec: ${e.message}`);
       }
 
       // 6. Sales-action Adlead "Réponse WhatsApp reçue" (seulement si lead matché)
