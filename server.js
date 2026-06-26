@@ -2161,7 +2161,7 @@ async function processPendingLead(entry) {
             },
           } : {};
           // Meta Cloud API : template relance_j1_catella → {{1}}=nom complet, {{2}}=programme, {{3}}=lien agenda
-          sendOptions.meta = { template: 'relance_j1_catella', params: [contact.fullname || firstname || 'bonjour', programName || 'votre projet', CONFIG.BOOKING_URL] };
+          sendOptions.meta = { template: 'relance_j1_catella', params: [contact.fullname || firstname || 'bonjour', programName || 'votre projet'] };
           const resp = await sendWhatsApp(phoneE164, body, sendOptions);
           whatsappSid = resp && resp.sid ? resp.sid : null;
           const mode = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? 'template' : 'body';
@@ -3518,7 +3518,7 @@ app.post('/api/admin/retry-whatsapp-failed', async (req, res) => {
             '2': record.programName || 'votre projet',
             ...(brochureUrl ? { '3': brochureUrl } : {}),
           },
-          meta: { template: 'relance_j1_catella', params: [record.contactName || firstName || 'bonjour', record.programName || 'votre projet', CONFIG.BOOKING_URL] },
+          meta: { template: 'relance_j1_catella', params: [record.contactName || firstName || 'bonjour', record.programName || 'votre projet'] },
         });
         record.whatsappSid = resp.sid || null;
         record.whatsappError = null;
@@ -4583,6 +4583,90 @@ function validateMetaSignature(req) {
   }
 }
 
+// Traite un message WhatsApp ENTRANT (prospect → numéro pro) reçu via le webhook Meta.
+// Match le lead, notifie Norman (Telegram), pose une sales-action Adlead (= le lead bouge
+// → les règles J+1/J+3/J+15 s'arrêtent), et persiste pour le dashboard. Idempotent par msgId.
+async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
+  const norm = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const fromNorm = norm(fromE164);
+  if (msgId && processedLeads.some(l => l.whatsappMessageSid === msgId)) {
+    console.log(`[inbound-wa] msg ${msgId} déjà traité — skip`);
+    return;
+  }
+  let match = null;
+  for (let i = processedLeads.length - 1; i >= 0; i--) {
+    const l = processedLeads[i];
+    if (l.status !== 'sent' || !l.whatsappTo) continue;
+    if (norm(l.whatsappTo) === fromNorm) { match = l; break; }
+  }
+  const contactDisplay = match ? (match.contactName || profileName || fromE164) : (profileName || fromE164);
+  const adleadUrl = match ? buildAdleadLeadUrl(match.programId, match.leadId) : null;
+  console.log(`[inbound-wa] 📥 ${contactDisplay} (${fromE164}) — match=${match ? match.leadId : 'AUCUN'} : "${String(body).slice(0, 120)}"`);
+
+  // 1. Notif Telegram (canal urgent — Norman répond ensuite depuis son app)
+  const tg = match
+    ? `📱 RÉPONSE WhatsApp PROSPECT\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${String(body).slice(0, 500)}"\n\n→ Adlead : ${adleadUrl}`
+    : `📱 WhatsApp ${profileName ? '(' + profileName + ')' : 'inconnu'} — ${fromE164}\n\nMessage :\n"${String(body).slice(0, 500)}"\n\n(non matché à un lead)`;
+  try { await sendTelegram(tg); } catch (e) { console.error(`[inbound-wa] Telegram échec: ${e.message}`); }
+
+  // 2. Sales-action Adlead (stoppe les relances)
+  if (match) {
+    try {
+      await inboxWatcher.createAdleadReplySalesAction({
+        programId: match.programId, leadId: match.leadId,
+        category: 'whatsapp_reply',
+        reasoning: `Réponse WhatsApp du prospect : ${String(body).slice(0, 200)}`,
+      });
+      console.log(`[inbound-wa] ✅ sales-action Adlead posée (lead ${match.leadId})`);
+    } catch (e) { console.error(`[inbound-wa] sales-action échec: ${e.message}`); }
+  }
+
+  // 3. Persist (audit dashboard)
+  processedLeads.push({
+    id: `wa-reply-${msgId || Date.now()}`,
+    status: 'whatsapp_reply_received',
+    leadId: match ? match.leadId : null,
+    programId: match ? match.programId : null,
+    programName: match ? match.programName : null,
+    contactName: match ? match.contactName : null,
+    whatsappFrom: fromE164,
+    whatsappBody: body,
+    whatsappMessageSid: msgId,
+    whatsappProfileName: profileName || null,
+    receivedAt: new Date().toISOString(),
+  });
+  saveProcessed();
+}
+
+// Écho de coexistence : Norman a répondu lui-même depuis l'app WhatsApp Business.
+// On l'enregistre pour garder l'historique conversationnel complet. Idempotent par echoId.
+function recordWhatsAppEcho({ toE164, body, echoId }) {
+  if (echoId && processedLeads.some(l => l.whatsappMessageSid === echoId)) return;
+  const norm = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const toNorm = norm(toE164);
+  let match = null;
+  for (let i = processedLeads.length - 1; i >= 0; i--) {
+    const l = processedLeads[i];
+    const p = l.whatsappTo || l.whatsappFrom;
+    if (p && norm(p) === toNorm) { match = l; break; }
+  }
+  processedLeads.push({
+    id: `wa-echo-${echoId || Date.now()}`,
+    status: 'whatsapp_reply_sent',
+    leadId: match ? match.leadId : null,
+    programId: match ? match.programId : null,
+    programName: match ? match.programName : null,
+    contactName: match ? match.contactName : null,
+    whatsappTo: toE164,
+    whatsappBody: body,
+    whatsappMessageSid: echoId,
+    fromApp: true,
+    processedAt: new Date().toISOString(),
+  });
+  saveProcessed();
+  console.log(`[inbound-wa] 🔁 écho enregistré (réponse depuis l'app vers ${toE164})`);
+}
+
 // POST : réception des événements WhatsApp
 app.post('/webhook/whatsapp-meta', async (req, res) => {
   if (!validateMetaSignature(req)) {
@@ -4602,13 +4686,16 @@ app.post('/webhook/whatsapp-meta', async (req, res) => {
           const echoes  = v.message_echoes || v.smb_message_echoes || [];
           const statuses = v.statuses || [];
           if (msgs.length) {
+            const profileName = v.contacts?.[0]?.profile?.name || '';
             for (const m of msgs) {
-              console.log(`[webhook/whatsapp-meta] 📥 message entrant de ${m.from} (type=${m.type}, id=${m.id}): "${(m.text?.body || '').slice(0, 100)}"`);
+              const text = m.text?.body || m.button?.text || m[m.type]?.caption || `[${m.type}]`;
+              processInboundWhatsApp({ fromE164: m.from, body: text, profileName, msgId: m.id })
+                .catch(e => console.error(`[webhook/whatsapp-meta] inbound err: ${e.message}`));
             }
           }
           if (echoes.length) {
             for (const e of echoes) {
-              console.log(`[webhook/whatsapp-meta] 🔁 écho (réponse depuis l'app) vers ${e.to || '?'} : "${(e.text?.body || '').slice(0, 100)}"`);
+              recordWhatsAppEcho({ toE164: e.to, body: e.text?.body || '', echoId: e.id });
             }
           }
           if (statuses.length) {
@@ -5554,7 +5641,7 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
         const r = await sendWhatsApp(whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
           contentVariables: { '1': _j3mName, '2': programName, ...(_j3mBrochureUrl ? { '3': _j3mBrochureUrl } : {}) },
-          meta: { template: 'relance_j3m_day2_catella', params: [_j3mName || 'bonjour', programName, CONFIG.BOOKING_URL] },
+          meta: { template: 'relance_j3m_day2_catella', params: [_j3mName || 'bonjour', programName] },
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
