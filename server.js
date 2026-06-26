@@ -4613,7 +4613,8 @@ app.post('/webhook/whatsapp-meta', async (req, res) => {
           }
           if (statuses.length) {
             for (const s of statuses) {
-              console.log(`[webhook/whatsapp-meta] 📊 statut ${s.status} pour msg ${s.id} (${s.recipient_id || ''})`);
+              const errTxt = s.errors ? ' ERR=' + JSON.stringify(s.errors).slice(0, 400) : '';
+              console.log(`[webhook/whatsapp-meta] 📊 statut ${s.status} pour msg ${s.id} (${s.recipient_id || ''})${errTxt}`);
             }
           }
           if (!msgs.length && !echoes.length && !statuses.length) {
