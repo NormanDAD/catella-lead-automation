@@ -48,6 +48,10 @@ const CONFIG = {
   META_PHONE_NUMBER_ID:   process.env.META_PHONE_NUMBER_ID || '',
   META_WABA_ID:           process.env.META_WABA_ID || '',
   META_GRAPH_VERSION:     process.env.META_GRAPH_VERSION || 'v21.0',
+  // Sélecteur de provider WhatsApp pour l'ENVOI : 'twilio' (legacy, défaut) ou 'meta'
+  // (Cloud API direct via coexistence Dualhook). Permet une bascule/rollback à chaud
+  // sans toucher au code. Tant que = 'twilio', aucun changement de comportement.
+  WHATSAPP_PROVIDER:      (process.env.WHATSAPP_PROVIDER || 'twilio').toLowerCase(),
   // Si false, on ne valide pas la signature du webhook (utile à l'onboarding tant
   // que META_APP_SECRET n'est pas encore connu). Repasser true dès que possible.
   META_WEBHOOK_VALIDATE:  process.env.META_WEBHOOK_VALIDATE !== 'false',
@@ -1400,6 +1404,66 @@ async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
   return await res.json();
 }
 
+/**
+ * Envoie un message WhatsApp via le Cloud API Meta direct (coexistence Dualhook).
+ * Deux modes :
+ *  - Template (cold-outreach / relances) : { templateName, bodyParams: [v1, v2, ...] }
+ *    → params positionnels {{1}},{{2}},... du template approuvé.
+ *  - Texte libre (session 24h ouverte, ex: auto-reply) : { text: "..." }
+ * Renvoie { sid, raw } — `sid` = id du message Meta (compat avec les call-sites Twilio).
+ */
+async function sendWhatsAppViaMetaCloud(toE164, { templateName, bodyParams, text, lang = 'fr' } = {}) {
+  if (!CONFIG.META_WHATSAPP_TOKEN || !CONFIG.META_PHONE_NUMBER_ID) {
+    throw new Error('Credentials Meta Cloud API non configurés (META_WHATSAPP_TOKEN / META_PHONE_NUMBER_ID)');
+  }
+  const to = String(toE164 || '').replace(/[^\d]/g, ''); // Meta veut le numéro sans '+'
+  let payload;
+  if (templateName) {
+    payload = {
+      messaging_product: 'whatsapp', to, type: 'template',
+      template: {
+        name: templateName,
+        language: { code: lang },
+        ...(bodyParams && bodyParams.length ? {
+          components: [{
+            type: 'body',
+            parameters: bodyParams.map(v => ({ type: 'text', text: String(v ?? '') })),
+          }],
+        } : {}),
+      },
+    };
+  } else {
+    payload = { messaging_product: 'whatsapp', to, type: 'text', text: { body: text || '', preview_url: false } };
+  }
+  const url = `https://graph.facebook.com/${CONFIG.META_GRAPH_VERSION}/${CONFIG.META_PHONE_NUMBER_ID}/messages`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${CONFIG.META_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Meta ${res.status}: ${JSON.stringify(d.error || d).slice(0, 200)}`);
+  }
+  return { sid: d.messages?.[0]?.id || null, raw: d };
+}
+
+/**
+ * Dispatcher d'envoi WhatsApp — route vers Meta ou Twilio selon CONFIG.WHATSAPP_PROVIDER.
+ * Backward-compatible : `options` garde le format Twilio ({templateSid, contentVariables}),
+ * et on AJOUTE `options.meta = { template, params }` pour le path Meta. Tant que le provider
+ * est 'twilio', le comportement est identique à sendWhatsAppViaTwilio().
+ */
+async function sendWhatsApp(toE164, body = '', options = {}) {
+  if (CONFIG.WHATSAPP_PROVIDER === 'meta') {
+    if (options.meta && options.meta.template) {
+      return sendWhatsAppViaMetaCloud(toE164, { templateName: options.meta.template, bodyParams: options.meta.params || [] });
+    }
+    return sendWhatsAppViaMetaCloud(toE164, { text: body }); // session libre (auto-reply)
+  }
+  return sendWhatsAppViaTwilio(toE164, body, options);
+}
+
 async function sendSMSViaTwilio(toE164, body) {
   if (!CONFIG.TWILIO_ACCOUNT_SID || !CONFIG.TWILIO_AUTH_TOKEN) {
     throw new Error('Credentials Twilio non configurés');
@@ -2096,7 +2160,9 @@ async function processPendingLead(entry) {
               ...(_j1BrochureUrl ? { "3": _j1BrochureUrl } : {}),
             },
           } : {};
-          const resp = await sendWhatsAppViaTwilio(phoneE164, body, sendOptions);
+          // Meta Cloud API : template relance_j1_catella → {{1}}=nom complet, {{2}}=programme, {{3}}=lien agenda
+          sendOptions.meta = { template: 'relance_j1_catella', params: [contact.fullname || firstname || 'bonjour', programName || 'votre projet', CONFIG.BOOKING_URL] };
+          const resp = await sendWhatsApp(phoneE164, body, sendOptions);
           whatsappSid = resp && resp.sid ? resp.sid : null;
           const mode = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? 'template' : 'body';
           console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (mode: ${mode}, sid: ${whatsappSid})`);
@@ -2765,6 +2831,23 @@ app.post('/api/test/telegram', async (req, res) => {
   res.status(result.ok ? 200 : 500).json(result);
 });
 
+// Test : envoi WhatsApp via Meta Cloud API direct (bypasse le flag WHATSAPP_PROVIDER).
+// Usage : POST /api/test/meta-send  body: { to, template, params:[...], text }
+//   - avec template+params → envoi d'un template approuvé (cold-outreach)
+//   - avec text → message libre (nécessite une fenêtre 24h ouverte)
+app.post('/api/test/meta-send', async (req, res) => {
+  const { to, template, params, text } = req.body || {};
+  if (!to) return res.status(400).json({ error: 'to requis (E164, ex: +33...)' });
+  try {
+    const r = template
+      ? await sendWhatsAppViaMetaCloud(to, { templateName: template, bodyParams: params || [] })
+      : await sendWhatsAppViaMetaCloud(to, { text: text || '✅ Test Meta Cloud API' });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Endpoint de test : force le traitement immédiat d'un lead (bypass fenêtre 24h + queue + check commercial).
 // Usage : POST /api/test/process-now?leadId=X[&interestId=Y][&programId=Z][&force=1]
 // - Si interestId manquant, on fetch le lead et on prend le premier interest.
@@ -3428,13 +3511,14 @@ app.post('/api/admin/retry-whatsapp-failed', async (req, res) => {
         }
         const firstName = splitName(record.contactName || '').firstname || '';
         const brochureUrl = getBrochureUrl(record.programName);
-        const resp = await sendWhatsAppViaTwilio(record.whatsappTo, '', {
+        const resp = await sendWhatsApp(record.whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
           contentVariables: {
             '1': firstName || 'bonjour',
             '2': record.programName || 'votre projet',
             ...(brochureUrl ? { '3': brochureUrl } : {}),
           },
+          meta: { template: 'relance_j1_catella', params: [record.contactName || firstName || 'bonjour', record.programName || 'votre projet', CONFIG.BOOKING_URL] },
         });
         record.whatsappSid = resp.sid || null;
         record.whatsappError = null;
@@ -5038,9 +5122,11 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     if (whatsappTo) {
       try {
         const _j16BrochureUrl = getBrochureUrl(programName);
-        const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
+        const _j16Name = (contact.fullname || salutation || '').trim();
+        const r = await sendWhatsApp(whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_J16,
-          contentVariables: { '1': firstName, '2': programName, ...(_j16BrochureUrl ? { '3': _j16BrochureUrl } : {}) },
+          contentVariables: { '1': _j16Name, '2': programName, ...(_j16BrochureUrl ? { '3': _j16BrochureUrl } : {}) },
+          meta: { template: 'relance_j16_catella', params: [_j16Name || 'bonjour', programName] },
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
@@ -5463,9 +5549,11 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     if (whatsappTo) {
       try {
         const _j3mBrochureUrl = getBrochureUrl(programName);
-        const r = await sendWhatsAppViaTwilio(whatsappTo, '', {
+        const _j3mName = (contact.fullname || salutation || '').trim();
+        const r = await sendWhatsApp(whatsappTo, '', {
           templateSid: CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
-          contentVariables: { '1': firstName, '2': programName, ...(_j3mBrochureUrl ? { '3': _j3mBrochureUrl } : {}) },
+          contentVariables: { '1': _j3mName, '2': programName, ...(_j3mBrochureUrl ? { '3': _j3mBrochureUrl } : {}) },
+          meta: { template: 'relance_j3m_day2_catella', params: [_j3mName || 'bonjour', programName, CONFIG.BOOKING_URL] },
         });
         whatsappSid = r?.sid || null;
       } catch (e) { whatsappError = e.message; }
