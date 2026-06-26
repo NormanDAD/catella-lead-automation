@@ -4600,16 +4600,12 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
     if (norm(l.whatsappTo) === fromNorm) { match = l; break; }
   }
   const contactDisplay = match ? (match.contactName || profileName || fromE164) : (profileName || fromE164);
-  const adleadUrl = match ? buildAdleadLeadUrl(match.programId, match.leadId) : null;
   console.log(`[inbound-wa] 📥 ${contactDisplay} (${fromE164}) — match=${match ? match.leadId : 'AUCUN'} : "${String(body).slice(0, 120)}"`);
 
-  // 1. Notif Telegram (canal urgent — Norman répond ensuite depuis son app)
-  const tg = match
-    ? `📱 RÉPONSE WhatsApp PROSPECT\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${String(body).slice(0, 500)}"\n\n→ Adlead : ${adleadUrl}`
-    : `📱 WhatsApp ${profileName ? '(' + profileName + ')' : 'inconnu'} — ${fromE164}\n\nMessage :\n"${String(body).slice(0, 500)}"\n\n(non matché à un lead)`;
-  try { await sendTelegram(tg); } catch (e) { console.error(`[inbound-wa] Telegram échec: ${e.message}`); }
+  // Pas de notif Telegram sur WhatsApp entrant : avec la coexistence, Norman voit le
+  // message nativement dans son app WhatsApp Business → la notif ferait doublon.
 
-  // 2. Sales-action Adlead (stoppe les relances)
+  // Sales-action Adlead (stoppe les relances)
   if (match) {
     try {
       await inboxWatcher.createAdleadReplySalesAction({
@@ -4944,22 +4940,8 @@ ${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; borde
         }
       }
 
-      // 5c. Telegram à Norman (canal urgent principal — il ne consulte pas le dashboard).
-      //     Envoyé à CHAQUE WhatsApp entrant, matché ou non.
-      const tgAutoReplyLine = autoReply
-        ? (autoReply.sent
-            ? `\n\n🤖 Réponse auto envoyée :\n"${String(autoReply.text).slice(0, 250)}${autoReply.text.length > 250 ? '…' : ''}"`
-            : `\n\n🤖 Pas de réponse auto (à traiter)${autoReply.error ? ` — erreur : ${autoReply.error}` : autoReply.note ? ` — ${autoReply.note}` : ''}`)
-        : '';
-      const tgBody = match
-        ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 500)}${body.length > 500 ? '…' : ''}"${tgAutoReplyLine}\n\n→ Adlead : ${adleadUrl}`
-        : `📱 WhatsApp inconnu ${profileName ? `(${profileName})` : ''} — ${fromE164}\n\nMessage :\n"${body.slice(0, 500)}${body.length > 500 ? '…' : ''}"\n\n(pas matché à un lead)`;
-      try {
-        const tg = await sendTelegram(tgBody);
-        if (tg.ok) console.log(`[webhook/whatsapp-incoming] ✅ Telegram Norman envoyé (msg ${tg.messageId})`);
-      } catch (e) {
-        console.error(`[webhook/whatsapp-incoming] ⚠️ Telegram Norman échec: ${e.message}`);
-      }
+      // (Notif Telegram retirée : avec la coexistence WhatsApp, Norman voit les messages
+      //  nativement dans son app → la notif faisait doublon.)
 
       // 6. Sales-action Adlead "Réponse WhatsApp reçue" (seulement si lead matché)
       if (match) {
