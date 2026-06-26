@@ -33,6 +33,24 @@ const CONFIG = {
   TELEGRAM_BOT_TOKEN:     process.env.TELEGRAM_BOT_TOKEN || '',
   TELEGRAM_CHAT_ID:       process.env.TELEGRAM_CHAT_ID || '',
   TELEGRAM_NOTIF_ENABLED: process.env.TELEGRAM_NOTIF_ENABLED !== 'false',
+  // ── WhatsApp Cloud API direct (coexistence via Dualhook) ───────────────────
+  // Migration Twilio → Meta Cloud API. Dualhook = Tech Provider qui (1) onboarde
+  // la coexistence (QR scan depuis l'app WhatsApp Business) et (2) configure le
+  // "Webhook Override" pour que Meta poste DIRECTEMENT sur /webhook/whatsapp-meta.
+  // L'envoi se fait en Graph API Meta direct (graph.facebook.com).
+  //   META_VERIFY_TOKEN : token de vérif du handshake GET (on le choisit, on le
+  //                       colle aussi dans Dualhook). Obligatoire pour l'onboarding.
+  //   META_APP_SECRET   : secret de l'app Meta → valide la signature X-Hub-Signature-256.
+  //   META_WHATSAPP_TOKEN / META_PHONE_NUMBER_ID / META_WABA_ID : remplis après l'onboarding.
+  META_VERIFY_TOKEN:      process.env.META_VERIFY_TOKEN || '',
+  META_APP_SECRET:        process.env.META_APP_SECRET || '',
+  META_WHATSAPP_TOKEN:    process.env.META_WHATSAPP_TOKEN || '',
+  META_PHONE_NUMBER_ID:   process.env.META_PHONE_NUMBER_ID || '',
+  META_WABA_ID:           process.env.META_WABA_ID || '',
+  META_GRAPH_VERSION:     process.env.META_GRAPH_VERSION || 'v21.0',
+  // Si false, on ne valide pas la signature du webhook (utile à l'onboarding tant
+  // que META_APP_SECRET n'est pas encore connu). Repasser true dès que possible.
+  META_WEBHOOK_VALIDATE:  process.env.META_WEBHOOK_VALIDATE !== 'false',
   ADLEAD_UI_BASE:        process.env.ADLEAD_UI_BASE || 'https://crm.adlead.immo/catella',
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
@@ -4438,6 +4456,91 @@ app.post('/webhook/twilio-status', express.urlencoded({ extended: false }), (req
     saveProcessed();
     console.log(`[twilio-status] lead ${record.leadId} SID=${sid} → ${status}`);
   }
+});
+
+// ─── WEBHOOK : Meta WhatsApp Cloud API (coexistence via Dualhook) ───────────
+// URL à coller dans Dualhook ET dans l'app Meta :
+//   https://lead-automation-production-33e8.up.railway.app/webhook/whatsapp-meta
+// GET  = handshake de vérification Meta (hub.challenge), gated par META_VERIFY_TOKEN.
+// POST = événements (messages entrants, statuts, smb_message_echoes = tes réponses
+//        depuis l'app). Signature X-Hub-Signature-256 validée via META_APP_SECRET.
+// Le traitement métier complet (match lead, auto-reply, bot-off sur écho) sera
+// branché en phase d'envoi ; ici on logge et on ACK pour valider l'onboarding.
+
+// GET : vérification du webhook (Meta/Dualhook appelle avec hub.mode/hub.verify_token/hub.challenge)
+app.get('/webhook/whatsapp-meta', (req, res) => {
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (!CONFIG.META_VERIFY_TOKEN) {
+    console.warn('[webhook/whatsapp-meta] GET refusé — META_VERIFY_TOKEN non configuré');
+    return res.sendStatus(503);
+  }
+  if (mode === 'subscribe' && token === CONFIG.META_VERIFY_TOKEN) {
+    console.log('[webhook/whatsapp-meta] ✅ handshake de vérification OK');
+    return res.status(200).send(challenge);
+  }
+  console.warn(`[webhook/whatsapp-meta] ❌ handshake refusé (mode=${mode}, token match=${token === CONFIG.META_VERIFY_TOKEN})`);
+  return res.sendStatus(403);
+});
+
+// Valide la signature X-Hub-Signature-256 (HMAC-SHA256 du raw body avec l'App Secret Meta).
+function validateMetaSignature(req) {
+  if (!CONFIG.META_WEBHOOK_VALIDATE) return true; // bypass explicite (onboarding)
+  if (!CONFIG.META_APP_SECRET) return true;       // pas encore de secret → on laisse passer
+  const header = req.headers['x-hub-signature-256'] || '';
+  if (!header.startsWith('sha256=') || !req.rawBody) return false;
+  const expected = 'sha256=' + crypto.createHmac('sha256', CONFIG.META_APP_SECRET)
+    .update(req.rawBody).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+// POST : réception des événements WhatsApp
+app.post('/webhook/whatsapp-meta', async (req, res) => {
+  if (!validateMetaSignature(req)) {
+    console.warn('[webhook/whatsapp-meta] signature X-Hub-Signature-256 invalide — refusé');
+    return res.sendStatus(403);
+  }
+  res.sendStatus(200); // ACK immédiat
+
+  setImmediate(() => {
+    try {
+      const entries = req.body?.entry || [];
+      for (const entry of entries) {
+        for (const change of (entry.changes || [])) {
+          const v = change.value || {};
+          const field = change.field;
+          const msgs    = v.messages || [];
+          const echoes  = v.message_echoes || v.smb_message_echoes || [];
+          const statuses = v.statuses || [];
+          if (msgs.length) {
+            for (const m of msgs) {
+              console.log(`[webhook/whatsapp-meta] 📥 message entrant de ${m.from} (type=${m.type}, id=${m.id}): "${(m.text?.body || '').slice(0, 100)}"`);
+            }
+          }
+          if (echoes.length) {
+            for (const e of echoes) {
+              console.log(`[webhook/whatsapp-meta] 🔁 écho (réponse depuis l'app) vers ${e.to || '?'} : "${(e.text?.body || '').slice(0, 100)}"`);
+            }
+          }
+          if (statuses.length) {
+            for (const s of statuses) {
+              console.log(`[webhook/whatsapp-meta] 📊 statut ${s.status} pour msg ${s.id} (${s.recipient_id || ''})`);
+            }
+          }
+          if (!msgs.length && !echoes.length && !statuses.length) {
+            console.log(`[webhook/whatsapp-meta] event field=${field} — ${JSON.stringify(v).slice(0, 200)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[webhook/whatsapp-meta] erreur parsing: ${e.message}`);
+    }
+  });
 });
 
 // ─── WEBHOOK : Twilio "WhatsApp incoming" (réponses prospect) ───────────────
