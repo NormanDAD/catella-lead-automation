@@ -98,6 +98,11 @@ const CONFIG = {
   TWILIO_WHATSAPP_FROM:  process.env.TWILIO_WHATSAPP_FROM || '',
   WHATSAPP_ENABLED:      process.env.WHATSAPP_ENABLED === 'true',
   SMS_FALLBACK_ENABLED:  process.env.SMS_FALLBACK_ENABLED === 'true',
+  // Garde-fou "action vendeur" (2026-07-07) : avant chaque relance (J+1/J+3/J+15), on
+  // scanne le fil /records du lead ; si une action commerciale du vendeur (appel, répondeur,
+  // meeting, note, message manuel) est postérieure à l'affectation (> receivedAt + 60s), on
+  // ne relance pas. Kill-switch : VENDOR_ACTION_GUARD_ENABLED=false pour désarmer sans revert.
+  VENDOR_ACTION_GUARD_ENABLED: process.env.VENDOR_ACTION_GUARD_ENABLED !== 'false',
   TWILIO_SMS_FROM:       process.env.TWILIO_SMS_FROM || 'Catella',
   // Agent WhatsApp : réponse auto contextuelle au prospect quand il répond en WhatsApp.
   // 100% automatique (le texte généré par Claude part directement). Gardé OFF par défaut :
@@ -1007,6 +1012,49 @@ async function fetchLead(leadId, { programId } = {}) {
   }
 }
 
+// ── GARDE-FOU "action vendeur" (2026-07-07) ──────────────────────────────────
+// Détecte une action commerciale du VENDEUR postérieure à l'affectation du lead,
+// pour ne pas relancer (J+1/J+3/J+15) un lead que le commercial a déjà pris en main.
+// - Exclut nos propres actions pipeline (email "Email envoyé" / sms "WhatsApp envoyé").
+// - Exclut le bruit de source/intake (interest, request-for-information) et les
+//   changements de statut (déjà couverts par le check statut/discard).
+// - Ne compte que les actions dont occurred_at > sinceMs (= receivedAt + 60s), pour
+//   ignorer la rafale d'événements de création du lead (évite le faux positif d'intake).
+// Best-effort : erreur API /records → renvoie null (pas de blocage), comportement inchangé.
+const VENDOR_ACTION_EVENTS = new Set([
+  'outgoing-call', 'outgoing-call-missed', 'incoming-call', 'incoming-call-missed',
+  'voicemail', 'meeting', 'appointment', 'visit', 'note',
+]);
+function isPipelineRecord(rec) {
+  const c = rec.comment || '';
+  return (rec.event === 'email' && c === 'Email envoyé')
+      || (rec.event === 'sms'   && c === 'WhatsApp envoyé');
+}
+async function findVendorActionSince(programId, leadId, sinceMs) {
+  let recs;
+  try {
+    recs = await adleadGet(`/programs/${programId}/leads/${leadId}/records`);
+  } catch (e) {
+    console.log(`[vendor-guard] lead ${leadId} — /records indispo (${String(e.message).slice(0, 80)}) → pas de blocage`);
+    return null;
+  }
+  if (!Array.isArray(recs)) return null;
+  for (const rec of recs) {
+    if (isPipelineRecord(rec)) continue;
+    const ev = rec.event;
+    const c = rec.comment || '';
+    const isVendor = VENDOR_ACTION_EVENTS.has(ev)
+      || (ev === 'sms'   && c !== 'WhatsApp envoyé')
+      || (ev === 'email' && c !== 'Email envoyé');
+    if (!isVendor) continue;
+    const occ = rec.occurred_at ? new Date(rec.occurred_at).getTime() : null;
+    if (occ != null && occ > sinceMs) {
+      return { event: ev, comment: rec.comment || null, occurred_at: rec.occurred_at };
+    }
+  }
+  return null;
+}
+
 async function fetchProgram(programId) {
   if (!programId) return null;
   try {
@@ -1854,6 +1902,26 @@ async function processPendingLead(entry) {
         contactName: contact.fullname || '',
         email,
       });
+    }
+
+    // ── GARDE-FOU "action vendeur" ───────────────────────────────────────────
+    // Si le vendeur a déjà engagé le lead (appel, répondeur, meeting, note, message
+    // manuel) après l'affectation (> receivedAt + 60s), on ne relance pas. entry.force
+    // (process-now) bypass. Best-effort : /records indispo → pas de blocage.
+    if (CONFIG.VENDOR_ACTION_GUARD_ENABLED && !entry.force && entry.receivedAt) {
+      const vendorAction = await findVendorActionSince(entry.programId, entry.leadId, new Date(entry.receivedAt).getTime() + 60_000);
+      if (vendorAction) {
+        console.log(`[process] lead ${entry.leadId} — action vendeur détectée (${vendorAction.event} @ ${vendorAction.occurred_at}) → on n'envoie pas`);
+        return finalize({
+          id: entry.interestId,
+          status: 'cancelled',
+          reason: `Action vendeur détectée (${vendorAction.event} @ ${vendorAction.occurred_at})`,
+          contactName: contact.fullname || '',
+          email,
+          programId: entry.programId,
+          programName: interest.program?.name || '',
+        });
+      }
     }
 
     // ── Scan OBSERVATIONNEL du payload lead ──────────────────────────────────
@@ -5119,6 +5187,17 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   // Relance envoyée → effacer le retryAfter
   record.j15RetryAfter = null;
 
+  // Garde-fou "action vendeur" — stop si le commercial a engagé le lead depuis l'affectation.
+  if (CONFIG.VENDOR_ACTION_GUARD_ENABLED) {
+    const refTs = record.receivedAt || record.processedAt;
+    if (refTs) {
+      const vendorAction = await findVendorActionSince(record.programId, record.leadId, new Date(refTs).getTime() + 60_000);
+      if (vendorAction) {
+        return { skipped: true, reason: `action vendeur détectée (${vendorAction.event} @ ${vendorAction.occurred_at})` };
+      }
+    }
+  }
+
   // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;
   if (!contact) return { skipped: true, reason: 'aucun contact sur le lead' };
@@ -5543,6 +5622,17 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     };
   }
   record.j3mRetryAfter = null;
+
+  // Garde-fou "action vendeur" — stop si le commercial a engagé le lead depuis l'affectation.
+  if (CONFIG.VENDOR_ACTION_GUARD_ENABLED) {
+    const refTs = record.receivedAt || record.processedAt;
+    if (refTs) {
+      const vendorAction = await findVendorActionSince(record.programId, record.leadId, new Date(refTs).getTime() + 60_000);
+      if (vendorAction) {
+        return { skipped: true, reason: `action vendeur détectée (${vendorAction.event} @ ${vendorAction.occurred_at})` };
+      }
+    }
+  }
 
   // Contact + email check.
   const contact = (lead.contacts && lead.contacts[0]) || null;

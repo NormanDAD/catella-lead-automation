@@ -38,6 +38,8 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 > Principe commun : avant chaque envoi, `fetchLead()` est appelé pour vérifier l'état réel du lead dans Adlead. Si le statut a changé, on n'envoie pas.
 > Fenêtre commune : lundi–samedi, 9h–20h Paris. Dimanche bloqué toute la journée.
 
+> **Garde-fou "action vendeur" (ajouté le 2026-07-07, validé par Norman).** En plus du check statut, avant CHAQUE relance (J+1, J+3, J+15) on appelle `findVendorActionSince(programId, leadId, receivedAt + 60s)` : si le fil Adlead `/records` contient une action commerciale du vendeur (`outgoing-call`, `outgoing-call-missed`, `incoming-call`, `voicemail`, `meeting`, `note`, ou un email/SMS **non** émis par la pipeline) postérieure à l'affectation (occurred_at > `receivedAt + 60s`), on **ne relance pas**. Raison d'être : un statut resté `pending` alors que le vendeur a déjà appelé/laissé un message ne bloquait pas les relances (cas lead 1654298). La tolérance de 60 s ignore la rafale d'événements de création (sinon faux positif d'intake). Nos propres records (`email`/"Email envoyé", `sms`/"WhatsApp envoyé") sont exclus. Best-effort : si `/records` est inaccessible, on ne bloque pas (comportement inchangé). Kill-switch : `VENDOR_ACTION_GUARD_ENABLED=false`. `entry.force` (process-now) bypasse le garde-fou.
+
 ### Règle 1 — J+1 — NE PAS MODIFIER (figée le 2026-05-28)
 
 Le pipeline envoie email + WhatsApp si ET SEULEMENT SI toutes ces conditions sont vraies :
@@ -97,7 +99,7 @@ L'ancien check via `/registrations` est désactivé par défaut (`SKIP_REGISTRAT
 - **Power Automate** : `POWER_AUTOMATE_URL` + `POWER_AUTOMATE_SECRET` (envoi mail prospect), `POWER_AUTOMATE_INBOX_SECRET` (webhook reply watcher)
 - **Twilio** : `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, templates ContentSid (`TWILIO_TEMPLATE_RELANCE_J1`, `_J15`, `_J16`, `_J3M_DAY2`)
 - **Telegram** : `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (bot `@Catella_notif_bot`)
-- **Kill switches** : `PIPELINE_DISABLED` (nucléaire), `WHATSAPP_ENABLED`, `INTERNAL_NOTIF_DISABLED`
+- **Kill switches** : `PIPELINE_DISABLED` (nucléaire), `WHATSAPP_ENABLED`, `INTERNAL_NOTIF_DISABLED`, `VENDOR_ACTION_GUARD_ENABLED` (garde-fou action vendeur, défaut ON)
 - **Agent WhatsApp (réponse auto)** : `WHATSAPP_AUTO_REPLY_ENABLED` (default OFF). Quand `true` + `WHATSAPP_ENABLED` + `ANTHROPIC_API_KEY`, l'agent répond **automatiquement** au prospect qui écrit en WhatsApp (`/webhook/whatsapp-incoming`), **uniquement si le numéro est matché à un lead connu**. Texte généré par Claude (`inboxWatcher.draftWhatsAppReply`), ton Norman, garde-fous anti-invention (prix/dispo/juridique → pivot RDV Bookings), brochure partagée si dispo, historique conversationnel injecté. Norman reçoit une copie de chaque réponse auto (email + WhatsApp interne) et peut corriger. Désinscription/litige/sensible → l'agent s'abstient (`shouldReply=false`). Couper : `WHATSAPP_AUTO_REPLY_ENABLED=false`.
 - **Listes** : `INSTANT_PROGRAM_IDS` (bypass T+24h), `EXCLUDED_PROGRAM_IDS`
 
