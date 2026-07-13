@@ -6011,29 +6011,37 @@ async function runDailyHealthCheck() {
       issues.push(`Twilio API inaccessible : ${e.message}`);
     }
   } else {
-    checks.twilioApi = '❌ credentials non configurés (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN manquants)';
-    checks.webhookUrl = '❌ non vérifié';
-    issues.push('Twilio non configuré');
+    // Twilio décommissionné le 2026-07-06 (WhatsApp désormais via Meta Cloud API).
+    // L'absence de creds Twilio est NORMALE → on n'alerte plus (sinon faux positif quotidien).
+    checks.twilioApi = 'ℹ️ Twilio décommissionné — WhatsApp via Meta Cloud API';
+    checks.webhookUrl = 'ℹ️ n/a (webhook entrant Meta : /webhook/whatsapp-meta)';
   }
 
-  // ── 2. Messages inbound reçus aujourd'hui et hier (via Twilio API) ──────────
-  try {
-    const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
-    const todayParis = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' }); // "2026-05-25"
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?To=${encodeURIComponent(CONFIG.TWILIO_WHATSAPP_FROM)}&PageSize=100`;
-    const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
-    if (r.ok) {
-      const data = await r.json();
-      const inbound = (data.messages || []).filter(m => m.direction === 'inbound');
-      const todayInbound = inbound.filter(m => (m.date_sent || m.date_created || '').startsWith(todayParis));
-      checks.inboundToday = todayInbound.length > 0
-        ? `✅ ${todayInbound.length} réponse(s) prospects reçue(s) aujourd'hui`
-        : `ℹ️ 0 réponse reçue aujourd'hui (normal si pas d'envoi la nuit)`;
-    } else {
-      checks.inboundToday = `⚠️ impossible de vérifier (HTTP ${r.status})`;
+  // ── 2. Messages inbound reçus aujourd'hui ──────────────────────────────────
+  // Twilio décommissionné : on ne vérifie plus l'inbound via son API (évite le HTTP 404).
+  // Les réponses entrantes sont désormais trackées via le webhook Meta et comptées
+  // depuis nos données locales (voir repliesInApp ci-dessous).
+  if (CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN) {
+    try {
+      const auth = Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString('base64');
+      const todayParis = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' }); // "2026-05-25"
+      const url = `https://api.twilio.com/2010-04-01/Accounts/${CONFIG.TWILIO_ACCOUNT_SID}/Messages.json?To=${encodeURIComponent(CONFIG.TWILIO_WHATSAPP_FROM)}&PageSize=100`;
+      const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+      if (r.ok) {
+        const data = await r.json();
+        const inbound = (data.messages || []).filter(m => m.direction === 'inbound');
+        const todayInbound = inbound.filter(m => (m.date_sent || m.date_created || '').startsWith(todayParis));
+        checks.inboundToday = todayInbound.length > 0
+          ? `✅ ${todayInbound.length} réponse(s) prospects reçue(s) aujourd'hui`
+          : `ℹ️ 0 réponse reçue aujourd'hui (normal si pas d'envoi la nuit)`;
+      } else {
+        checks.inboundToday = `⚠️ impossible de vérifier (HTTP ${r.status})`;
+      }
+    } catch (e) {
+      checks.inboundToday = `⚠️ erreur fetch Twilio : ${e.message}`;
     }
-  } catch (e) {
-    checks.inboundToday = `⚠️ erreur fetch Twilio : ${e.message}`;
+  } else {
+    checks.inboundToday = 'ℹ️ réponses trackées via webhook Meta (voir « Réponses enregistrées »)';
   }
 
   // ── 3. Stats pipeline local ────────────────────────────────────────────────
