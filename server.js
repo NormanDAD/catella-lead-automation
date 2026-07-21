@@ -1023,7 +1023,7 @@ async function fetchLead(leadId, { programId } = {}) {
 // Best-effort : erreur API /records → renvoie null (pas de blocage), comportement inchangé.
 const VENDOR_ACTION_EVENTS = new Set([
   'outgoing-call', 'outgoing-call-missed', 'incoming-call', 'incoming-call-missed',
-  'voicemail', 'meeting', 'appointment', 'visit', 'note',
+  'voicemail', 'meeting', 'appointment', 'visit', 'note', 'comment',
 ]);
 function isPipelineRecord(rec) {
   const c = rec.comment || '';
