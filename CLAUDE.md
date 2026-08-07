@@ -18,7 +18,7 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 
 - `server.js` (~3700 lignes) = tout le backend Express : webhook, scheduler (tick 5 min), crons règles 2 et 3, helpers Adlead/Twilio/Power Automate/Telegram/Graph
 - `public/index.html` = dashboard single-page (KPIs, feed, tooltips, réponses prospect)
-- `programmes.json` = mapping nom de programme → accroche personnalisée (61 entrées, indexé par **nom**, pas par ID)
+- `programmes.json` = mapping nom de programme → accroche personnalisée (59 entrées, indexé par **nom**, pas par ID). Ce n'est **pas** le périmètre de la pipeline — voir "Périmètre" plus bas.
 - `/data/` sur volume Railway = persistance (`pending_leads.json`, `processed_leads.json`, `program_name_cache.json`, `graph_token_cache.json`)
 - Pas de DB. Tout en JSON sur disque.
 
@@ -86,7 +86,23 @@ Structure identique sur les 7 templates (J+1, J+3 ×3, J+15 ×3). Ne jamais modi
 - **Pas de brochure** (retirée volontairement le 2026-05-28).
 - Signature courte (`Norman DADON — Catella Residential — Logement neuf`).
 
-**`brochures.json`** : indexé par nom de programme (exact ou normalisé sans accents/casse). 34/58 programmes couverts. Les 24 sans PDF enverront l'email sans bouton brochure (silencieux, pas de skip).
+**`brochures.json`** : indexé par nom de programme (exact ou normalisé sans accents/casse). 89 entrées, dont beaucoup pour des programmes qui ne sont plus au catalogue Adlead. Sur les 28 programmes actifs, 12 ont une brochure. Les autres envoient l'email sans bouton brochure (silencieux, pas de skip).
+
+## Périmètre — quels programmes entrent dans la pipeline
+
+Le périmètre n'est **pas** défini par `programmes.json` mais par **`EXCLUDED_PROGRAM_IDS`** (liste de programIds Adlead, séparés par virgule). Tout lead reçu sur le webhook est enqueué, sauf si son `programId` y figure.
+
+L'exclusion est appliquée à 4 endroits, donc elle coupe les 3 cadences **et** rattrape les leads déjà en file :
+- `server.js:1577` — à l'enqueue (le lead n'entre jamais)
+- `server.js:1666` — au traitement (stoppe un lead déjà en queue si l'ID est ajouté après coup)
+- `server.js:5088` — éligibilité J+15
+- `server.js:5507` — éligibilité J+3M
+
+Mettre un programme en pause = ajouter son ID à cette variable + redeploy Railway (la variable est lue au boot, `server.js:257`). Réversible en retirant l'ID.
+
+**État au 2026-08-07** : 64 programmes au catalogue Adlead, 37 exclus, **28 actifs** (`685 PROGRAMME TEST` inclus — à surveiller, il enverrait de vrais mails). 11 des 28 actifs sont absents de `programmes.json` → relancés sans accroche personnalisée.
+
+Note : `INSTANT_PROGRAM_IDS` (bypass du T+24h) est évalué **après** l'exclusion — un ID présent dans les deux listes reste exclu.
 
 ## Check dénonciation (post-incident 2026-05-06)
 
@@ -121,7 +137,7 @@ Liste complète : `README.md` section "Endpoints".
 ## Gotchas (= choses qui ont déjà mordu)
 
 1. **`programNameCache` est en mémoire** mais désormais persisté dans `/data/program_name_cache.json` (commit `814853c`). Avant ce commit, chaque redeploy le vidait → leads skip silencieusement faute de nom.
-2. **`programmes.json` est indexé par nom de programme** (pas par ID). Si le cache résout un nom qui n'est pas une clé dans `programmes.json`, le lead est skip (faute d'accroche).
+2. **`programmes.json` est indexé par nom de programme** (pas par ID). Un programme absent du fichier **n'est PAS skip** : `findProgramme()` renvoie `null`, l'accroche est vide et l'email part quand même avec ville/promoteur issus du fallback API Adlead (`server.js:2082-2084`). Le seul skip lié au programme est un **nom non résolvable** (fallback `Programme #XXX` après 3 tentatives) — `server.js:5219` (J+15) et `server.js:5655` (J+3M).
 3. **Webhook `/webhook/inbox-reply` retourne `matched: 'true'/'false'` en STRING** (pas booléen) — compat condition Power Automate.
 4. **Reply Watcher passe par Power Automate**, pas par Graph direct. Raison : la Conditional Access policy de Catella bloque l'auth Graph depuis l'IP serveur Railway (le serveur n'est pas un device Catella enregistré). Voir `POWER_AUTOMATE_INBOX_SECRET`.
 5. **`PATCH /leads/{id}` côté Adlead n'existe pas encore** (annoncé été 2026 par Cédric). Le code tente quand même, récupère 405 silencieusement. `STATUS_UPDATE_ENABLED=true` par défaut, mettre à `false` si les logs polluent.
