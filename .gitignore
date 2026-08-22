@@ -35,3 +35,6 @@ lead-automation-v2/
 
 # Patches / diffs de brouillon locaux
 *.patch
+
+# Exports de contacts (données personnelles prospects — ne jamais commiter)
+contacts-*.csv
