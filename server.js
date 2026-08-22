@@ -1453,6 +1453,21 @@ async function sendWhatsAppViaTwilio(toE164, body, options = {}) {
 }
 
 /**
+ * Calcule le `appsecret_proof` exigé par Meta sur les appels serveur.
+ * Meta l'impose dès que l'app — ou le portefeuille business qui la contient — active
+ * « Require app secret proof ». Sans lui : `Meta 400 code 100 "appsecret_proof is
+ * required but not provided"`, ce qui a coupé tous les envois du 11/08 au 22/08/2026.
+ * C'est un HMAC-SHA256 du token d'acces, cle par le secret de l'app.
+ * Renvoie '' si META_APP_SECRET n'est pas renseigne (comportement d'avant le patch).
+ */
+function metaAppSecretProof() {
+  if (!CONFIG.META_APP_SECRET || !CONFIG.META_WHATSAPP_TOKEN) return '';
+  return crypto.createHmac('sha256', CONFIG.META_APP_SECRET)
+               .update(CONFIG.META_WHATSAPP_TOKEN)
+               .digest('hex');
+}
+
+/**
  * Envoie un message WhatsApp via le Cloud API Meta direct (coexistence Dualhook).
  * Deux modes :
  *  - Template (cold-outreach / relances) : { templateName, bodyParams: [v1, v2, ...] }
@@ -1483,7 +1498,9 @@ async function sendWhatsAppViaMetaCloud(toE164, { templateName, bodyParams, text
   } else {
     payload = { messaging_product: 'whatsapp', to, type: 'text', text: { body: text || '', preview_url: false } };
   }
-  const url = `https://graph.facebook.com/${CONFIG.META_GRAPH_VERSION}/${CONFIG.META_PHONE_NUMBER_ID}/messages`;
+  const proof = metaAppSecretProof();
+  const url = `https://graph.facebook.com/${CONFIG.META_GRAPH_VERSION}/${CONFIG.META_PHONE_NUMBER_ID}/messages`
+            + (proof ? `?appsecret_proof=${proof}` : '');
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${CONFIG.META_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
@@ -2387,6 +2404,7 @@ app.get('/api/health', (req, res) => {
       j1WhatsappEnabled: CONFIG.WHATSAPP_ENABLED,
       j1TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
       twilioConfigured: !!(CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN && CONFIG.TWILIO_WHATSAPP_FROM),
+      metaAppSecretConfigured: !!CONFIG.META_APP_SECRET,
     },
     whatsappDiag: (() => {
       const waLeads = processedLeads.filter(l => l.whatsappEnabled);
