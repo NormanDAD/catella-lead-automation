@@ -26,7 +26,7 @@ Pipeline Node.js (sur Railway) qui reçoit les webhooks Adlead `interest:created
 
 | Règle | Quand | État actuel | Kill switches |
 |---|---|---|---|
-| **R1 — J+1** | T+24h après webhook (ou immédiat pour `INSTANT_PROGRAM_IDS`) | **Auto-send ACTIVÉ** — le pipeline envoie automatiquement email + WhatsApp | `J1_AUTO_SEND_DISABLED=false` (variable absente = auto-send actif) |
+| **R1 — J+1** | T+24h après webhook | **Auto-send ACTIVÉ** — la relance prospect part directement une fois les checks passés | `J1_AUTO_SEND_DISABLED=false` (variable absente = auto-send actif) |
 | **R2 — J+3 matin** | Cron 9h15 Paris, scan des leads en statut Adlead `pending` depuis ≥24h, 3 jours d'escalation (email doux → WhatsApp template → email final) | **Actif en prod** (`J3M_SEND_DISABLED=false`) | `J3M_ENABLED`, `J3M_SEND_DISABLED`, `WHATSAPP_J3M_ENABLED` |
 | **R3 — J+15** | Cron 10h Paris, scan des leads en stagnation `pending`, 3 jours d'escalation à J+15/+16/+17 sur `last_interaction_at` | Activé, mais `TWILIO_TEMPLATE_RELANCE_J15` vide (fallback email) | `J15_ENABLED`, `J15_SEND_DISABLED`, `WHATSAPP_J15_ENABLED` |
 
@@ -100,7 +100,7 @@ L'exclusion est appliquée à 4 endroits, donc elle coupe les 3 cadences **et** 
 
 Mettre un programme en pause = ajouter son ID à cette variable + redeploy Railway (la variable est lue au boot, `server.js:257`). Réversible en retirant l'ID.
 
-**État au 2026-08-07** : 64 programmes au catalogue Adlead, 37 exclus, **28 actifs** (`685 PROGRAMME TEST` inclus — à surveiller, il enverrait de vrais mails). 11 des 28 actifs sont absents de `programmes.json` → relancés sans accroche personnalisée.
+**État au 2026-09-15** : 64 programmes au catalogue Adlead, 46 exclus, **18 actifs**. `INSTANT_PROGRAM_IDS` a été supprimée le 2026-09-03 : plus aucun envoi immédiat, tous les leads attendent 24 h. `651 Le Haut Bois` retiré le 2026-09-08 (plus de droit de commercialisation). 4 des 18 actifs sont absents de `programmes.json` (132, 417, 666, 706) → relancés sans accroche, ville et promoteur vides.
 
 Note : `INSTANT_PROGRAM_IDS` (bypass du T+24h) est évalué **après** l'exclusion — un ID présent dans les deux listes reste exclu.
 
@@ -116,7 +116,7 @@ L'ancien check via `/registrations` est désactivé par défaut (`SKIP_REGISTRAT
 - **Twilio** : `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, templates ContentSid (`TWILIO_TEMPLATE_RELANCE_J1`, `_J15`, `_J16`, `_J3M_DAY2`)
 - **Telegram** : `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (bot `@Catella_notif_bot`)
 - **Kill switches** : `PIPELINE_DISABLED` (nucléaire), `WHATSAPP_ENABLED`, `INTERNAL_NOTIF_DISABLED`, `VENDOR_ACTION_GUARD_ENABLED` (garde-fou action vendeur, défaut ON)
-- **Agent WhatsApp (réponse auto)** : `WHATSAPP_AUTO_REPLY_ENABLED` (default OFF). Quand `true` + `WHATSAPP_ENABLED` + `ANTHROPIC_API_KEY`, l'agent répond **automatiquement** au prospect qui écrit en WhatsApp (`/webhook/whatsapp-incoming`), **uniquement si le numéro est matché à un lead connu**. Texte généré par Claude (`inboxWatcher.draftWhatsAppReply`), ton Norman, garde-fous anti-invention (prix/dispo/juridique → pivot RDV Bookings), brochure partagée si dispo, historique conversationnel injecté. Norman reçoit une copie de chaque réponse auto (email + WhatsApp interne) et peut corriger. Désinscription/litige/sensible → l'agent s'abstient (`shouldReply=false`). Couper : `WHATSAPP_AUTO_REPLY_ENABLED=false`.
+- **Agent WhatsApp (réponse auto)** : `WHATSAPP_AUTO_REPLY_ENABLED` (default OFF). Quand `true` + `WHATSAPP_ENABLED` + `ANTHROPIC_API_KEY`, l'agent répond **automatiquement** au prospect qui écrit en WhatsApp — via `/webhook/whatsapp-meta` → `processInboundWhatsApp()` (étape 5) —, **uniquement si le numéro est matché à un lead connu**. Texte généré par Claude (`inboxWatcher.draftWhatsAppReply`), ton Norman, garde-fous anti-invention (prix/dispo/juridique → pivot RDV Bookings), brochure partagée si dispo, historique conversationnel injecté. Norman voit la réponse nativement dans WhatsApp Business (coexistence) et sur le dashboard, et peut corriger. Désinscription/litige/sensible → l'agent s'abstient (`shouldReply=false`). Couper : `WHATSAPP_AUTO_REPLY_ENABLED=false`.
 - **Listes** : `INSTANT_PROGRAM_IDS` (bypass T+24h), `EXCLUDED_PROGRAM_IDS`
 
 Liste exhaustive et explications : voir `README.md` section "Variables d'environnement" et le bloc `CONFIG = { ... }` en haut de `server.js`.
@@ -130,7 +130,7 @@ Liste exhaustive et explications : voir `README.md` section "Variables d'environ
 - `POST /api/test/process-now` — traite 1 lead immédiatement (body `{leadId, programId, force}`)
 - `POST /api/admin/resolve-program-names` — résout les `Programme #XXX` via Adlead (peuple le cache)
 - `POST /api/admin/backfill-program-names` — rétrofitte le programName des vieux records depuis le cache
-- `POST /webhook/adlead`, `/webhook/inbox-reply`, `/webhook/whatsapp-incoming`
+- `POST /webhook/adlead`, `/webhook/inbox-reply`, `/webhook/whatsapp-meta`
 
 Liste complète : `README.md` section "Endpoints".
 

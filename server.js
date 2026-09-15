@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const inboxWatcher = require('./inboxWatcher');
-const { buildHandoverEmail } = require('./leadHandover');
 
 const app = express();
 
@@ -135,21 +134,6 @@ const CONFIG = {
   // pour valider le code en prod sans risque d'envoi indu. Ajouté après
   // l'incident 2026-05-15 (mon /api/test/j15-dry-run envoyait pour de vrai).
   J15_SEND_DISABLED:     process.env.J15_SEND_DISABLED === 'true',
-  // ── Transfert des leads en retard à un commercial (2026-08-31) ────────────
-  // Demande Norman : il ne traite plus lui-même les leads en retard. Dès qu'un
-  // lead atteint son seuil de retard (24 h + 1 s après le webhook), on envoie un
-  // récap complet (contact + programme + recherche du prospect) à Emmanuel
-  // Zerbib, qui le traite directement dans Adlead. La relance au prospect ne
-  // part qu'après HANDOVER_GRACE_HOURS si le lead est toujours sans action.
-  // Un récap part aussi (best-effort) au jour 1 des cycles J+3 et J+15.
-  HANDOVER_ENABLED:      process.env.HANDOVER_ENABLED !== 'false',
-  HANDOVER_EMAIL:        process.env.HANDOVER_EMAIL || 'Emmanuel.zerbib@catella.com',
-  // Copie à Norman. Le flow Power Automate n'expose pas de champ "cc" : on envoie
-  // un second mail identique à cette adresse. Vide = pas de copie.
-  HANDOVER_CC_EMAIL:     process.env.HANDOVER_CC_EMAIL || process.env.INTERNAL_NOTIF_EMAIL || 'norman.dadon@catella.com',
-  // Délai laissé au commercial avant que la relance prospect J+1 parte quand même.
-  // Validé par Norman le 2026-08-31 : 24 h (le prospect est donc relancé à J+2).
-  HANDOVER_GRACE_HOURS:  Number(process.env.HANDOVER_GRACE_HOURS || 24),
   // ── Kill switch J+1 auto-send ────────────────────────────────────────────
   // Si true, processPendingLead tourne normalement (fetch, checks, dénonciation)
   // mais SKIP les envois mail/WhatsApp/notif/tag/status. Le record est finalisé
@@ -955,50 +939,6 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   }
 }
 
-// ─── RÉCAP "LEAD À TRAITER" AU COMMERCIAL (Emmanuel Zerbib) ─────────────────
-// Ajouté le 2026-08-31. Envoie le mail construit par leadHandover.js à
-// HANDOVER_EMAIL, avec copie à HANDOVER_CC_EMAIL (second envoi : le flow Power
-// Automate n'a pas de champ cc). Best-effort côté copie : si la copie échoue,
-// le mail principal reste considéré comme envoyé.
-// Retourne { sent, error } — jamais de throw, les appelants sont tous en best-effort
-// SAUF le path J+1 qui utilise `sent` pour décider s'il temporise la relance.
-async function sendLeadHandoverEmail({ stage, lead, contact, programId, leadId, programName, ville, promoteur, receivedAt, dayNumber }) {
-  if (!CONFIG.HANDOVER_ENABLED) {
-    console.log(`[handover] DÉSACTIVÉ via HANDOVER_ENABLED=false — skip lead ${leadId} (${stage})`);
-    return { sent: false, disabled: true };
-  }
-  if (!CONFIG.HANDOVER_EMAIL) {
-    console.warn(`[handover] HANDOVER_EMAIL non configuré — skip lead ${leadId}`);
-    return { sent: false, error: 'HANDOVER_EMAIL non configuré' };
-  }
-  const { subject, html } = buildHandoverEmail({
-    stage,
-    lead,
-    contact,
-    programName,
-    ville,
-    promoteur,
-    adleadUrl: buildAdleadLeadUrl(programId, leadId),
-    receivedAt,
-    graceHours: CONFIG.HANDOVER_GRACE_HOURS,
-    dayNumber,
-  });
-  try {
-    await sendEmailViaPowerAutomate(CONFIG.HANDOVER_EMAIL, subject, html);
-    console.log(`[handover] ✅ récap ${stage} envoyé à ${CONFIG.HANDOVER_EMAIL} — lead ${leadId} (${programName})`);
-  } catch (e) {
-    console.error(`[handover] ⚠️ échec récap ${stage} lead ${leadId}: ${e.message}`);
-    return { sent: false, error: e.message };
-  }
-  if (CONFIG.HANDOVER_CC_EMAIL && CONFIG.HANDOVER_CC_EMAIL !== CONFIG.HANDOVER_EMAIL) {
-    try {
-      await sendEmailViaPowerAutomate(CONFIG.HANDOVER_CC_EMAIL, `[copie] ${subject}`, html);
-    } catch (e) {
-      console.error(`[handover] ⚠️ copie à ${CONFIG.HANDOVER_CC_EMAIL} échouée lead ${leadId}: ${e.message}`);
-    }
-  }
-  return { sent: true, subject };
-}
 
 // Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
 // (le pipeline n'a pas pu vérifier si le lead est dénoncé, donc n'envoie RIEN).
@@ -1734,7 +1674,6 @@ async function processPendingLead(entry) {
       checkAt: entry.checkAt,
       processedAt: new Date().toISOString(),
       ...(entry.manualSource ? { manualOverride: true } : {}),
-      ...(entry.handoverSentAt ? { handoverSentAt: entry.handoverSentAt } : {}),
     });
     saveProcessed();
   };
@@ -2126,53 +2065,6 @@ async function processPendingLead(entry) {
       }
     }
 
-    // ─── TRANSFERT DU LEAD AU COMMERCIAL (2026-08-31, validé Norman) ────────
-    // À ce stade, le lead a passé TOUS les checks : pas dénoncé, statut encore
-    // "to-process"/"pending", aucune action vendeur, contact + email valides.
-    // Il est donc bien "en retard" au sens de la règle J+1 (24 h + 1 s).
-    // Nouveau comportement : on ne relance PAS le prospect tout de suite — on
-    // envoie d'abord le récap complet à HANDOVER_EMAIL (Emmanuel Zerbib) et on
-    // repousse la relance de HANDOVER_GRACE_HOURS (24 h). Au passage suivant,
-    // handoverSentAt est posé : le flux reprend son cours normal et la relance
-    // part, sauf si les checks ci-dessus ont entre-temps sorti le lead de la file
-    // (c'est exactement le cas "Emmanuel a traité" → plus rien n'est envoyé).
-    // Exclus du transfert : les programmes INSTANT (Norman est le commercial
-    // dessus, l'envoi immédiat est voulu) et les process-now manuels.
-    if (CONFIG.HANDOVER_ENABLED && !entry.handoverSentAt && !entry.instant && !entry.force) {
-      const handoverProgramme = findProgramme(programName);
-      const handoverResult = await sendLeadHandoverEmail({
-        stage: 'j1',
-        lead,
-        contact,
-        programId: entry.programId,
-        leadId: entry.leadId,
-        programName,
-        ville: (handoverProgramme && handoverProgramme.ville) || programApi?.city || programApi?.ville || '',
-        promoteur: (handoverProgramme && handoverProgramme.promoteur) || programApi?.developer?.name || programApi?.promoteur || '',
-        receivedAt: entry.receivedAt,
-      });
-      if (handoverResult.sent) {
-        entry.handoverSentAt = new Date().toISOString();
-        entry.checkAt = new Date(Date.now() + CONFIG.HANDOVER_GRACE_HOURS * 60 * 60 * 1000).toISOString();
-        entry.attempts = 0; // nouveau cycle : ne pas consommer le budget de retry
-        savePending();
-        console.log(`[process] lead ${entry.leadId} transmis à ${CONFIG.HANDOVER_EMAIL} — relance prospect repoussée à ${entry.checkAt}`);
-        return; // reste en queue, pas de finalize
-      }
-      // Échec d'envoi du récap (Power Automate KO) : on retente au tick suivant
-      // plutôt que de relancer le prospect sans avoir prévenu le commercial.
-      // Fail-open au bout de 6 essais (~1 h) : le lead ne doit pas rester bloqué
-      // en file indéfiniment si le flow Power Automate est durablement cassé.
-      entry.handoverAttempts = (entry.handoverAttempts || 0) + 1;
-      if (entry.handoverAttempts < 6 && !handoverResult.disabled) {
-        entry.checkAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-        savePending();
-        console.warn(`[process] récap handover échoué lead ${entry.leadId} (essai ${entry.handoverAttempts}/6) → retry à ${entry.checkAt}`);
-        return;
-      }
-      console.error(`[process] récap handover impossible après ${entry.handoverAttempts} essais lead ${entry.leadId} → on poursuit avec la relance prospect`);
-    }
-
     // ─── GATE J1_AUTO_SEND_DISABLED ─────────────────────────────────────────
     // Si activé, on a fait tous les checks (lead valide, contact OK, pas dénoncé,
     // commercial n'a pas agi) mais on NE déclenche AUCUN envoi auto-J+1. Le record
@@ -2512,10 +2404,6 @@ app.get('/api/health', (req, res) => {
       // J+1 WhatsApp
       j1WhatsappEnabled: CONFIG.WHATSAPP_ENABLED,
       j1TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
-      handoverEnabled: CONFIG.HANDOVER_ENABLED,
-      handoverEmail: CONFIG.HANDOVER_EMAIL,
-      handoverCcEmail: CONFIG.HANDOVER_CC_EMAIL || null,
-      handoverGraceHours: CONFIG.HANDOVER_GRACE_HOURS,
       twilioConfigured: !!(CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN && CONFIG.TWILIO_WHATSAPP_FROM),
       metaAppSecretConfigured: !!CONFIG.META_APP_SECRET,
     },
@@ -2992,47 +2880,6 @@ app.post('/api/test/email-preview', async (req, res) => {
 });
 
 
-// Prévisualisation du récap "lead à traiter" sur un VRAI lead, sans rien envoyer.
-// Usage : GET /api/test/handover-preview?programId=X&leadId=Y&stage=j1|j3|j15
-//         GET ...&send=1  → envoie réellement le mail (à HANDOVER_EMAIL + copie)
-// Réservé au dashboard authentifié (requireAdmin) : la réponse contient les
-// coordonnées du prospect.
-app.get('/api/test/handover-preview', requireAdmin, async (req, res) => {
-  const { programId, leadId, stage = 'j1' } = req.query;
-  if (!programId || !leadId) return res.status(400).json({ error: 'programId et leadId requis' });
-  try {
-    const lead = await fetchLead(leadId, { programId });
-    if (!lead) return res.status(404).json({ error: 'lead introuvable côté Adlead' });
-    let programName = programNameCache.get(String(programId)) || null;
-    if (!programName) {
-      const prog = await fetchProgram(programId);
-      programName = prog?.name || prog?.nom_commercial || `Programme #${programId}`;
-    }
-    const programme = findProgramme(programName);
-    if (req.query.send === '1') {
-      const r = await sendLeadHandoverEmail({
-        stage, lead, programId, leadId, programName,
-        ville: (programme && programme.ville) || '',
-        promoteur: (programme && programme.promoteur) || '',
-        receivedAt: lead.created_at,
-        dayNumber: 1,
-      });
-      return res.json({ sent: r.sent, to: CONFIG.HANDOVER_EMAIL, cc: CONFIG.HANDOVER_CC_EMAIL, subject: r.subject, error: r.error || null });
-    }
-    const { subject, html } = buildHandoverEmail({
-      stage, lead, programName,
-      ville: (programme && programme.ville) || '',
-      promoteur: (programme && programme.promoteur) || '',
-      adleadUrl: buildAdleadLeadUrl(programId, leadId),
-      receivedAt: lead.created_at,
-      graceHours: CONFIG.HANDOVER_GRACE_HOURS,
-      dayNumber: 1,
-    });
-    res.type('html').send(`<!-- sujet: ${escapeHtml(subject)} -->\n${html}`);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
 // Usage : POST /api/test/adlead-update?programId=X&leadId=Y
@@ -5243,26 +5090,6 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     };
   }
 
-  // Récap au commercial — une seule fois par cycle J+15 (jour 1), best-effort.
-  if (dayNumber === 1) {
-    try {
-      await sendLeadHandoverEmail({
-        stage: 'j15',
-        lead,
-        contact,
-        programId: record.programId,
-        leadId: record.leadId,
-        programName,
-        ville: (programmeEntry && programmeEntry.ville) || '',
-        promoteur: (programmeEntry && programmeEntry.promoteur) || '',
-        receivedAt: record.receivedAt || record.processedAt,
-        dayNumber,
-      });
-    } catch (e) {
-      console.error(`[j15] ⚠️ récap handover échoué lead ${record.leadId}: ${e.message}`);
-    }
-  }
-
   // Envoi réel.
   let emailError = null, whatsappSid = null, whatsappError = null;
   if (channel === 'email' || channel === 'email-fallback') {
@@ -5698,27 +5525,6 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
       dayNumber, channel, email, subject, whatsappTo,
       dryRun: !!dryRun, sendDisabled: !!sendDisabled,
     };
-  }
-
-  // Récap au commercial — une seule fois par cycle J+3 (jour 1), best-effort :
-  // un échec ici ne doit pas empêcher la relance prospect de partir.
-  if (dayNumber === 1) {
-    try {
-      await sendLeadHandoverEmail({
-        stage: 'j3',
-        lead,
-        contact,
-        programId: record.programId,
-        leadId: record.leadId,
-        programName,
-        ville: (programmeEntry && programmeEntry.ville) || '',
-        promoteur: (programmeEntry && programmeEntry.promoteur) || '',
-        receivedAt: record.receivedAt || record.processedAt,
-        dayNumber,
-      });
-    } catch (e) {
-      console.error(`[j3m] ⚠️ récap handover échoué lead ${record.leadId}: ${e.message}`);
-    }
   }
 
   // Envoi réel.

@@ -178,6 +178,23 @@ Statuts possibles : `queued` → `accepted` → `sending` → `sent` → `delive
 
 ---
 
+## 11 bis. Transfert des leads en retard au commercial
+
+Tests hors ligne (aucun envoi, aucun réseau) :
+
+```bash
+```
+
+Prévisualiser le récap d'un **vrai** lead sans l'envoyer (dashboard connecté, ou `x-admin-token`) :
+
+```bash
+  -H "x-admin-token: $ADMIN_UPLOAD_TOKEN" > /tmp/recap.html && open /tmp/recap.html
+```
+
+Dans le dashboard, un lead déjà transmis apparaît dans la file d'attente avec la mention « transmis au commercial » et un `checkAt` à +24 h.
+
+---
+
 ## 12. Checklist rapide après un redéploiement
 
 Après un push vers `main` (Railway redéploie automatiquement) :
