@@ -4675,6 +4675,10 @@ function validateMetaSignature(req) {
       // (digests differents, meme taille de corps) de "corps re-serialise par un relais"
       // (le corps recu n'est plus les octets exacts signes par Meta).
       console.warn(`[meta-sig] MISMATCH recu=${header.slice(7, 19)}… attendu=${expected.slice(7, 19)}… bodyLen=${req.rawBody.length}o ct="${req.headers['content-type'] || ''}"`);
+      // Qui envoie ? Meta signe depuis ses propres plages (AS32934) et s'annonce
+      // "facebookplatform/1.0". Un relais tiers apparaitra avec une autre IP et un
+      // autre User-Agent — c'est ce qui distingue un mauvais secret d'un intermediaire.
+      console.warn(`[meta-sig] expediteur ip=${req.ip} xff="${req.headers['x-forwarded-for'] || '-'}" ua="${String(req.headers['user-agent'] || '-').slice(0, 80)}"`);
     }
     return ok;
   } catch (e) {
