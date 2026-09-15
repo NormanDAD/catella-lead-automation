@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const inboxWatcher = require('./inboxWatcher');
+const { buildHandoverEmail } = require('./leadHandover');
 
 const app = express();
 
@@ -134,6 +135,21 @@ const CONFIG = {
   // pour valider le code en prod sans risque d'envoi indu. Ajouté après
   // l'incident 2026-05-15 (mon /api/test/j15-dry-run envoyait pour de vrai).
   J15_SEND_DISABLED:     process.env.J15_SEND_DISABLED === 'true',
+  // ── Transfert des leads en retard à un commercial (2026-08-31) ────────────
+  // Demande Norman : il ne traite plus lui-même les leads en retard. Dès qu'un
+  // lead atteint son seuil de retard (24 h + 1 s après le webhook), on envoie un
+  // récap complet (contact + programme + recherche du prospect) à Emmanuel
+  // Zerbib, qui le traite directement dans Adlead. La relance au prospect ne
+  // part qu'après HANDOVER_GRACE_HOURS si le lead est toujours sans action.
+  // Un récap part aussi (best-effort) au jour 1 des cycles J+3 et J+15.
+  HANDOVER_ENABLED:      process.env.HANDOVER_ENABLED !== 'false',
+  HANDOVER_EMAIL:        process.env.HANDOVER_EMAIL || 'Emmanuel.zerbib@catella.com',
+  // Copie à Norman. Le flow Power Automate n'expose pas de champ "cc" : on envoie
+  // un second mail identique à cette adresse. Vide = pas de copie.
+  HANDOVER_CC_EMAIL:     process.env.HANDOVER_CC_EMAIL || process.env.INTERNAL_NOTIF_EMAIL || 'norman.dadon@catella.com',
+  // Délai laissé au commercial avant que la relance prospect J+1 parte quand même.
+  // Validé par Norman le 2026-08-31 : 24 h (le prospect est donc relancé à J+2).
+  HANDOVER_GRACE_HOURS:  Number(process.env.HANDOVER_GRACE_HOURS || 24),
   // ── Kill switch J+1 auto-send ────────────────────────────────────────────
   // Si true, processPendingLead tourne normalement (fetch, checks, dénonciation)
   // mais SKIP les envois mail/WhatsApp/notif/tag/status. Le record est finalisé
@@ -929,7 +945,7 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
         `Contact : ${contactName || contactEmail || 'inconnu'}\n` +
         `→ ${adleadUrl}\n` +
         `(Pose une action Adlead avant qu'un autre vendeur ne te vole le lead.)`;
-      const resp = await sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
+      const resp = await sendWhatsApp(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
       console.log(`[internal-notif] ✅ WhatsApp ping envoyé à ${CONFIG.INTERNAL_NOTIF_PHONE} (sid: ${resp?.sid || 'n/a'}) — lead ${leadId}`);
     } catch (e) {
       console.error(`[internal-notif] ⚠️ WhatsApp ping échec lead ${leadId}: ${e.message}`);
@@ -937,6 +953,51 @@ async function sendInternalNotif({ programId, leadId, contactName, contactEmail,
   } else if (!CONFIG.INTERNAL_NOTIF_PHONE) {
     console.log(`[internal-notif] (info) INTERNAL_NOTIF_PHONE non configuré → pas de WhatsApp ping. Lead ${leadId}.`);
   }
+}
+
+// ─── RÉCAP "LEAD À TRAITER" AU COMMERCIAL (Emmanuel Zerbib) ─────────────────
+// Ajouté le 2026-08-31. Envoie le mail construit par leadHandover.js à
+// HANDOVER_EMAIL, avec copie à HANDOVER_CC_EMAIL (second envoi : le flow Power
+// Automate n'a pas de champ cc). Best-effort côté copie : si la copie échoue,
+// le mail principal reste considéré comme envoyé.
+// Retourne { sent, error } — jamais de throw, les appelants sont tous en best-effort
+// SAUF le path J+1 qui utilise `sent` pour décider s'il temporise la relance.
+async function sendLeadHandoverEmail({ stage, lead, contact, programId, leadId, programName, ville, promoteur, receivedAt, dayNumber }) {
+  if (!CONFIG.HANDOVER_ENABLED) {
+    console.log(`[handover] DÉSACTIVÉ via HANDOVER_ENABLED=false — skip lead ${leadId} (${stage})`);
+    return { sent: false, disabled: true };
+  }
+  if (!CONFIG.HANDOVER_EMAIL) {
+    console.warn(`[handover] HANDOVER_EMAIL non configuré — skip lead ${leadId}`);
+    return { sent: false, error: 'HANDOVER_EMAIL non configuré' };
+  }
+  const { subject, html } = buildHandoverEmail({
+    stage,
+    lead,
+    contact,
+    programName,
+    ville,
+    promoteur,
+    adleadUrl: buildAdleadLeadUrl(programId, leadId),
+    receivedAt,
+    graceHours: CONFIG.HANDOVER_GRACE_HOURS,
+    dayNumber,
+  });
+  try {
+    await sendEmailViaPowerAutomate(CONFIG.HANDOVER_EMAIL, subject, html);
+    console.log(`[handover] ✅ récap ${stage} envoyé à ${CONFIG.HANDOVER_EMAIL} — lead ${leadId} (${programName})`);
+  } catch (e) {
+    console.error(`[handover] ⚠️ échec récap ${stage} lead ${leadId}: ${e.message}`);
+    return { sent: false, error: e.message };
+  }
+  if (CONFIG.HANDOVER_CC_EMAIL && CONFIG.HANDOVER_CC_EMAIL !== CONFIG.HANDOVER_EMAIL) {
+    try {
+      await sendEmailViaPowerAutomate(CONFIG.HANDOVER_CC_EMAIL, `[copie] ${subject}`, html);
+    } catch (e) {
+      console.error(`[handover] ⚠️ copie à ${CONFIG.HANDOVER_CC_EMAIL} échouée lead ${leadId}: ${e.message}`);
+    }
+  }
+  return { sent: true, subject };
 }
 
 // Notif interne envoyée quand un lead est BLOQUÉ par le fail-closed dénonciation
@@ -1673,6 +1734,7 @@ async function processPendingLead(entry) {
       checkAt: entry.checkAt,
       processedAt: new Date().toISOString(),
       ...(entry.manualSource ? { manualOverride: true } : {}),
+      ...(entry.handoverSentAt ? { handoverSentAt: entry.handoverSentAt } : {}),
     });
     saveProcessed();
   };
@@ -2064,6 +2126,53 @@ async function processPendingLead(entry) {
       }
     }
 
+    // ─── TRANSFERT DU LEAD AU COMMERCIAL (2026-08-31, validé Norman) ────────
+    // À ce stade, le lead a passé TOUS les checks : pas dénoncé, statut encore
+    // "to-process"/"pending", aucune action vendeur, contact + email valides.
+    // Il est donc bien "en retard" au sens de la règle J+1 (24 h + 1 s).
+    // Nouveau comportement : on ne relance PAS le prospect tout de suite — on
+    // envoie d'abord le récap complet à HANDOVER_EMAIL (Emmanuel Zerbib) et on
+    // repousse la relance de HANDOVER_GRACE_HOURS (24 h). Au passage suivant,
+    // handoverSentAt est posé : le flux reprend son cours normal et la relance
+    // part, sauf si les checks ci-dessus ont entre-temps sorti le lead de la file
+    // (c'est exactement le cas "Emmanuel a traité" → plus rien n'est envoyé).
+    // Exclus du transfert : les programmes INSTANT (Norman est le commercial
+    // dessus, l'envoi immédiat est voulu) et les process-now manuels.
+    if (CONFIG.HANDOVER_ENABLED && !entry.handoverSentAt && !entry.instant && !entry.force) {
+      const handoverProgramme = findProgramme(programName);
+      const handoverResult = await sendLeadHandoverEmail({
+        stage: 'j1',
+        lead,
+        contact,
+        programId: entry.programId,
+        leadId: entry.leadId,
+        programName,
+        ville: (handoverProgramme && handoverProgramme.ville) || programApi?.city || programApi?.ville || '',
+        promoteur: (handoverProgramme && handoverProgramme.promoteur) || programApi?.developer?.name || programApi?.promoteur || '',
+        receivedAt: entry.receivedAt,
+      });
+      if (handoverResult.sent) {
+        entry.handoverSentAt = new Date().toISOString();
+        entry.checkAt = new Date(Date.now() + CONFIG.HANDOVER_GRACE_HOURS * 60 * 60 * 1000).toISOString();
+        entry.attempts = 0; // nouveau cycle : ne pas consommer le budget de retry
+        savePending();
+        console.log(`[process] lead ${entry.leadId} transmis à ${CONFIG.HANDOVER_EMAIL} — relance prospect repoussée à ${entry.checkAt}`);
+        return; // reste en queue, pas de finalize
+      }
+      // Échec d'envoi du récap (Power Automate KO) : on retente au tick suivant
+      // plutôt que de relancer le prospect sans avoir prévenu le commercial.
+      // Fail-open au bout de 6 essais (~1 h) : le lead ne doit pas rester bloqué
+      // en file indéfiniment si le flow Power Automate est durablement cassé.
+      entry.handoverAttempts = (entry.handoverAttempts || 0) + 1;
+      if (entry.handoverAttempts < 6 && !handoverResult.disabled) {
+        entry.checkAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        savePending();
+        console.warn(`[process] récap handover échoué lead ${entry.leadId} (essai ${entry.handoverAttempts}/6) → retry à ${entry.checkAt}`);
+        return;
+      }
+      console.error(`[process] récap handover impossible après ${entry.handoverAttempts} essais lead ${entry.leadId} → on poursuit avec la relance prospect`);
+    }
+
     // ─── GATE J1_AUTO_SEND_DISABLED ─────────────────────────────────────────
     // Si activé, on a fait tous les checks (lead valide, contact OK, pas dénoncé,
     // commercial n'a pas agi) mais on NE déclenche AUCUN envoi auto-J+1. Le record
@@ -2403,6 +2512,10 @@ app.get('/api/health', (req, res) => {
       // J+1 WhatsApp
       j1WhatsappEnabled: CONFIG.WHATSAPP_ENABLED,
       j1TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
+      handoverEnabled: CONFIG.HANDOVER_ENABLED,
+      handoverEmail: CONFIG.HANDOVER_EMAIL,
+      handoverCcEmail: CONFIG.HANDOVER_CC_EMAIL || null,
+      handoverGraceHours: CONFIG.HANDOVER_GRACE_HOURS,
       twilioConfigured: !!(CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN && CONFIG.TWILIO_WHATSAPP_FROM),
       metaAppSecretConfigured: !!CONFIG.META_APP_SECRET,
     },
@@ -2878,6 +2991,48 @@ app.post('/api/test/email-preview', async (req, res) => {
   }
 });
 
+
+// Prévisualisation du récap "lead à traiter" sur un VRAI lead, sans rien envoyer.
+// Usage : GET /api/test/handover-preview?programId=X&leadId=Y&stage=j1|j3|j15
+//         GET ...&send=1  → envoie réellement le mail (à HANDOVER_EMAIL + copie)
+// Réservé au dashboard authentifié (requireAdmin) : la réponse contient les
+// coordonnées du prospect.
+app.get('/api/test/handover-preview', requireAdmin, async (req, res) => {
+  const { programId, leadId, stage = 'j1' } = req.query;
+  if (!programId || !leadId) return res.status(400).json({ error: 'programId et leadId requis' });
+  try {
+    const lead = await fetchLead(leadId, { programId });
+    if (!lead) return res.status(404).json({ error: 'lead introuvable côté Adlead' });
+    let programName = programNameCache.get(String(programId)) || null;
+    if (!programName) {
+      const prog = await fetchProgram(programId);
+      programName = prog?.name || prog?.nom_commercial || `Programme #${programId}`;
+    }
+    const programme = findProgramme(programName);
+    if (req.query.send === '1') {
+      const r = await sendLeadHandoverEmail({
+        stage, lead, programId, leadId, programName,
+        ville: (programme && programme.ville) || '',
+        promoteur: (programme && programme.promoteur) || '',
+        receivedAt: lead.created_at,
+        dayNumber: 1,
+      });
+      return res.json({ sent: r.sent, to: CONFIG.HANDOVER_EMAIL, cc: CONFIG.HANDOVER_CC_EMAIL, subject: r.subject, error: r.error || null });
+    }
+    const { subject, html } = buildHandoverEmail({
+      stage, lead, programName,
+      ville: (programme && programme.ville) || '',
+      promoteur: (programme && programme.promoteur) || '',
+      adleadUrl: buildAdleadLeadUrl(programId, leadId),
+      receivedAt: lead.created_at,
+      graceHours: CONFIG.HANDOVER_GRACE_HOURS,
+      dayNumber: 1,
+    });
+    res.type('html').send(`<!-- sujet: ${escapeHtml(subject)} -->\n${html}`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Endpoint de test : appelle directement les helpers Adlead (sans envoi email, sans délai).
 // Usage : POST /api/test/adlead-update?programId=X&leadId=Y
@@ -4203,7 +4358,7 @@ app.post('/conversations/reply', express.urlencoded({ extended: false }), async 
   const { to, body, leadId, programId, contactName, programName } = req.body || {};
   if (!to || !body) return res.redirect('/conversations?err=missing');
   try {
-    const resp = await sendWhatsAppViaTwilio(to, body);
+    const resp = await sendWhatsApp(to, body);
     processedLeads.push({ id: `wa-sent-${Date.now()}`, status: 'whatsapp_reply_sent', leadId: leadId || null, programId: programId || null, programName: programName || null, contactName: contactName || null, whatsappTo: to, whatsappBody: body, whatsappSid: resp.sid || null, processedAt: new Date().toISOString() });
     saveProcessed();
     res.redirect('/conversations?sent=1');
@@ -4231,7 +4386,7 @@ app.post('/api/whatsapp/reply', async (req, res) => {
   }
 
   try {
-    const resp = await sendWhatsAppViaTwilio(to, body);
+    const resp = await sendWhatsApp(to, body);
     const record = {
       id:           `wa-sent-${Date.now()}`,
       status:       'whatsapp_reply_sent',
@@ -4659,12 +4814,24 @@ function validateMetaSignature(req) {
   if (!CONFIG.META_WEBHOOK_VALIDATE) return true; // bypass explicite (onboarding)
   if (!CONFIG.META_APP_SECRET) return true;       // pas encore de secret → on laisse passer
   const header = req.headers['x-hub-signature-256'] || '';
-  if (!header.startsWith('sha256=') || !req.rawBody) return false;
+  if (!header.startsWith('sha256=') || !req.rawBody) {
+    console.warn(`[meta-sig] rejet precoce — header="${String(header).slice(0, 20)}" rawBody=${req.rawBody ? req.rawBody.length + 'o' : 'ABSENT'} ct="${req.headers['content-type'] || ''}"`);
+    return false;
+  }
   const expected = 'sha256=' + crypto.createHmac('sha256', CONFIG.META_APP_SECRET)
     .update(req.rawBody).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
-  } catch {
+    const ok = crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+    if (!ok) {
+      // Diagnostic : n'expose aucun secret, seulement les 12 premiers caracteres des
+      // deux digests + la taille du corps. Permet de distinguer "mauvais app secret"
+      // (digests differents, meme taille de corps) de "corps re-serialise par un relais"
+      // (le corps recu n'est plus les octets exacts signes par Meta).
+      console.warn(`[meta-sig] MISMATCH recu=${header.slice(7, 19)}… attendu=${expected.slice(7, 19)}… bodyLen=${req.rawBody.length}o ct="${req.headers['content-type'] || ''}"`);
+    }
+    return ok;
+  } catch (e) {
+    console.warn(`[meta-sig] comparaison impossible (${e.message}) — headerLen=${header.length} expectedLen=${expected.length}`);
     return false;
   }
 }
@@ -4703,7 +4870,24 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
     } catch (e) { console.error(`[inbound-wa] sales-action échec: ${e.message}`); }
   }
 
-  // 3. Persist (audit dashboard)
+  // 3. Historique conversationnel AVANT de persister le message courant, pour que
+  //    l'agent recoive les echanges precedents et pas le message qu'il doit traiter.
+  const history = processedLeads
+    .filter(l => {
+      if (l.status === 'whatsapp_reply_received' && l.whatsappFrom)
+        return norm(l.whatsappFrom) === fromNorm;
+      if (l.status === 'whatsapp_reply_sent' && l.whatsappTo)
+        return norm(l.whatsappTo) === fromNorm;
+      return false;
+    })
+    .map(l => ({
+      direction: l.status === 'whatsapp_reply_sent' ? 'out' : 'in',
+      body:      l.whatsappBody || '',
+      at:        l.receivedAt || l.processedAt || '',
+    }))
+    .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+
+  // 4. Persist (audit dashboard)
   processedLeads.push({
     id: `wa-reply-${msgId || Date.now()}`,
     status: 'whatsapp_reply_received',
@@ -4718,6 +4902,61 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
     receivedAt: new Date().toISOString(),
   });
   saveProcessed();
+
+  // 5. AGENT WHATSAPP — reponse auto contextuelle.
+  //    Gate : flag arme + WhatsApp actif + cle Claude + lead matche. La fenetre de
+  //    service Meta de 24 h est garantie ouverte (le prospect vient d'ecrire), donc
+  //    l'envoi part en texte libre — gratuit, pas de template. L'idempotence par
+  //    msgId est deja assuree par le early-return en tete de fonction.
+  //    Couper : WHATSAPP_AUTO_REPLY_ENABLED=false.
+  if (CONFIG.WHATSAPP_AUTO_REPLY_ENABLED && CONFIG.WHATSAPP_ENABLED
+      && CONFIG.ANTHROPIC_API_KEY && match) {
+    try {
+      const prog = findProgramme(match.programName) || {};
+      const leadCtx = {
+        leadId:      match.leadId,
+        programId:   match.programId,
+        contactName: match.contactName || profileName || null,
+        programName: match.programName || null,
+        salutation:  match.contactName || profileName || null,
+      };
+      const programCtx = {
+        name:        match.programName || null,
+        ville:       prog.ville || null,
+        promoteur:   prog.promoteur || null,
+        accroche:    prog.accroche || null,
+        brochureUrl: getBrochureUrl(match.programName),
+      };
+
+      const draft = await inboxWatcher.draftWhatsAppReply({
+        incomingBody: body, leadContext: leadCtx, programContext: programCtx, history,
+      });
+
+      if (draft.shouldReply && draft.text) {
+        const resp = await sendWhatsApp(fromE164, draft.text);
+        processedLeads.push({
+          id:           `wa-autoreply-${msgId || Date.now()}`,
+          status:       'whatsapp_reply_sent',
+          leadId:       match.leadId,
+          programId:    match.programId,
+          programName:  match.programName || null,
+          contactName:  match.contactName || null,
+          whatsappTo:   fromE164,
+          whatsappBody: draft.text,
+          whatsappSid:  resp?.sid || resp?.messageId || null,
+          autoReply:    true,
+          inReplyToSid: msgId || null,
+          processedAt:  new Date().toISOString(),
+        });
+        saveProcessed();
+        console.log(`[inbound-wa] 🤖 reponse auto envoyee a ${fromE164} : "${draft.text.slice(0, 120)}"`);
+      } else {
+        console.log(`[inbound-wa] 🤖 pas de reponse auto (shouldReply=false) : ${draft.internalNote || '—'}`);
+      }
+    } catch (e) {
+      console.error(`[inbound-wa] 🤖 agent auto-reply echec: ${e.message}`);
+    }
+  }
 }
 
 // Écho de coexistence : Norman a répondu lui-même depuis l'app WhatsApp Business.
@@ -4796,282 +5035,11 @@ app.post('/webhook/whatsapp-meta', async (req, res) => {
     }
   });
 });
-
-// ─── WEBHOOK : Twilio "WhatsApp incoming" (réponses prospect) ───────────────
-// Configuré côté Twilio : WhatsApp Senders > +13853324609 > Edit > "Webhook URL for
-// incoming messages" → https://lead-automation-production-33e8.up.railway.app/webhook/whatsapp-incoming
-// Méthode : HTTP POST. Twilio envoie form-urlencoded (From, To, Body, ProfileName, MessageSid…).
-// Sécurité : signature HMAC SHA1 validée via x-twilio-signature (TWILIO_VALIDATE_SIGNATURE=false
-// pour bypass en dev/debug seulement).
-app.post('/webhook/whatsapp-incoming', express.urlencoded({ extended: false }), async (req, res) => {
-  // 1. Validation signature Twilio
-  // Reconstruction URL exacte pour validation signature Twilio.
-  // TWILIO_WEBHOOK_BASE_URL hardcodé évite le problème Railway (x-forwarded-host absent).
-  const base    = (CONFIG.TWILIO_WEBHOOK_BASE_URL || '').replace(/\/$/, '');
-  const fullUrl = base
-    ? `${base}${req.originalUrl}`
-    : `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers['x-forwarded-host'] || req.headers.host}${req.originalUrl}`;
-  if (CONFIG.TWILIO_VALIDATE_SIGNATURE) {
-    if (!validateTwilioSignature(req, fullUrl)) {
-      console.warn(`[webhook/whatsapp-incoming] signature Twilio invalide (url=${fullUrl}) — refusé`);
-      return res.status(403).type('text/xml').send('<Response/>');
-    }
-  } else {
-    console.warn('[webhook/whatsapp-incoming] (info) validation signature désactivée — debug uniquement');
-  }
-
-  // 2. ACK immédiat (twiml vide = pas de réponse auto au prospect)
-  res.status(200).type('text/xml').send('<Response/>');
-
-  // 3. Extract des champs Twilio (form-urlencoded)
-  const p           = req.body || {};
-  const fromRaw     = String(p.From || '');           // "whatsapp:+33612345678"
-  const toRaw       = String(p.To   || '');           // "whatsapp:+13853324609"
-  const body        = String(p.Body || '').trim();
-  const msgSid      = p.MessageSid || p.SmsMessageSid || null;
-  const profileName = p.ProfileName || '';
-  const fromE164    = fromRaw.replace(/^whatsapp:/, '').trim();
-
-  if (!fromE164 || !body) {
-    console.log('[webhook/whatsapp-incoming] payload incomplet — ignoré', { fromE164, hasBody: !!body, msgSid });
-    return;
-  }
-  console.log(`[webhook/whatsapp-incoming] reçu de ${fromE164} (profile: "${profileName}", sid: ${msgSid}): "${body.slice(0, 100)}"`);
-
-  // 4. Traitement asynchrone non bloquant (best-effort)
-  setImmediate(async () => {
-    try {
-      // Match : cherche le lead "sent" le plus récent avec whatsappTo == fromE164.
-      // Normalise les 2 côtés (E164 strict, virer espaces/non-digits) pour matcher
-      // même si l'enregistrement contient des variantes de formatage.
-      const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
-      const fromNorm = normalizeForMatch(fromE164);
-      let match = null;
-      for (let i = processedLeads.length - 1; i >= 0; i--) {
-        const l = processedLeads[i];
-        if (l.status !== 'sent') continue;
-        if (!l.whatsappTo) continue;
-        if (normalizeForMatch(l.whatsappTo) === fromNorm) {
-          match = l;
-          break;
-        }
-      }
-
-      // Si le match existe mais a programName/contactName nuls (ex: record reconstruit post-ENOSPC),
-      // extraire depuis les corps des messages connus pour ce numéro et persister dans processedLeads.
-      if (match && (!match.programName || !match.contactName)) {
-        const allSamePhone = processedLeads.filter(l => {
-          const p = l.whatsappTo || l.whatsappFrom;
-          return p && normalizeForMatch(p) === fromNorm;
-        });
-        const msgs = allSamePhone.map(l => ({ body: l.whatsappBody || '' }));
-        const enrichedName = !match.contactName ? (extractNameFromBodies(msgs) || profileName || null) : null;
-        const enrichedProg = !match.programName ? extractProgramFromBodies(msgs) : null;
-        if (enrichedName || enrichedProg) {
-          match = { ...match,
-            contactName: enrichedName || match.contactName,
-            programName: enrichedProg || match.programName,
-          };
-          // Persister l'enrichissement sur tous les records du même numéro
-          for (const l of allSamePhone) {
-            if (!l.contactName && enrichedName) l.contactName = enrichedName;
-            if (!l.programName && enrichedProg)  l.programName = enrichedProg;
-          }
-        }
-      }
-
-      // 4b. AGENT WHATSAPP — réponse auto contextuelle (100% automatique).
-      //     Gated : flag armé + WhatsApp activé + clé Claude + lead matché + pas un
-      //     retry Twilio (même msgSid). La fenêtre Meta 24h est garantie ouverte
-      //     (le prospect vient d'écrire). Le texte généré par l'agent part DIRECTEMENT
-      //     au prospect. Norman reçoit une copie dans les notifs ci-dessous.
-      const alreadyProcessed = !!(msgSid && processedLeads.some(l => l.whatsappMessageSid === msgSid));
-      let autoReply = null; // { sent, text, note, error }
-      if (CONFIG.WHATSAPP_AUTO_REPLY_ENABLED && CONFIG.WHATSAPP_ENABLED
-          && CONFIG.ANTHROPIC_API_KEY && match && !alreadyProcessed) {
-        try {
-          const prog = findProgramme(match.programName) || {};
-          const leadCtx = {
-            leadId:      match.leadId,
-            programId:   match.programId,
-            contactName: match.contactName || profileName || null,
-            programName: match.programName || null,
-            salutation:  match.contactName || profileName || null,
-          };
-          const programCtx = {
-            name:        match.programName || null,
-            ville:       prog.ville || null,
-            promoteur:   prog.promoteur || null,
-            accroche:    prog.accroche || null,
-            brochureUrl: getBrochureUrl(match.programName),
-          };
-          // Historique conversationnel avec ce numéro (inbound + outbound), chronologique.
-          const history = processedLeads
-            .filter(l => {
-              if (l.status === 'whatsapp_reply_received' && l.whatsappFrom)
-                return normalizeForMatch(l.whatsappFrom) === fromNorm;
-              if (l.status === 'whatsapp_reply_sent' && l.whatsappTo)
-                return normalizeForMatch(l.whatsappTo) === fromNorm;
-              return false;
-            })
-            .map(l => ({
-              direction: l.status === 'whatsapp_reply_sent' ? 'out' : 'in',
-              body:      l.whatsappBody || '',
-              at:        l.receivedAt || l.processedAt || '',
-            }))
-            .sort((a, b) => String(a.at).localeCompare(String(b.at)));
-
-          const draft = await inboxWatcher.draftWhatsAppReply({
-            incomingBody: body, leadContext: leadCtx, programContext: programCtx, history,
-          });
-
-          if (draft.shouldReply && draft.text) {
-            const resp = await sendWhatsAppViaTwilio(fromE164, draft.text);
-            processedLeads.push({
-              id:           `wa-autoreply-${msgSid || Date.now()}`,
-              status:       'whatsapp_reply_sent',
-              leadId:       match.leadId,
-              programId:    match.programId,
-              programName:  match.programName || null,
-              contactName:  match.contactName || null,
-              whatsappTo:   fromE164,
-              whatsappBody: draft.text,
-              whatsappSid:  resp.sid || null,
-              autoReply:    true,
-              inReplyToSid: msgSid || null,
-              processedAt:  new Date().toISOString(),
-            });
-            saveProcessed();
-            autoReply = { sent: true, text: draft.text, note: draft.internalNote };
-            console.log(`[webhook/whatsapp-incoming] 🤖 réponse auto envoyée à ${fromE164} (sid: ${resp.sid})`);
-          } else {
-            autoReply = { sent: false, text: '', note: draft.internalNote || 'Agent a choisi de ne pas répondre.' };
-            console.log(`[webhook/whatsapp-incoming] 🤖 pas de réponse auto (shouldReply=false) : ${draft.internalNote}`);
-          }
-        } catch (e) {
-          autoReply = { sent: false, text: '', error: e.message };
-          console.error(`[webhook/whatsapp-incoming] 🤖 agent auto-reply échec: ${e.message}`);
-        }
-      }
-
-      // 5a. Ping email + WhatsApp à Norman (même si pas matché — on lui passe quand même
-      //     le message en mode "numéro inconnu" pour qu'il puisse identifier manuellement).
-      const adleadUrl = match ? buildAdleadLeadUrl(match.programId, match.leadId) : null;
-      const contactDisplay = match ? (match.contactName || profileName || fromE164)
-                                   : (profileName || fromE164);
-      const programDisplay = match ? (match.programName || `programme #${match.programId}`)
-                                   : '— (lead inconnu)';
-      const notifSubject = match
-        ? `📱 RÉPONSE WhatsApp — ${contactDisplay} — ${programDisplay}`
-        : `📱 WhatsApp ${profileName ? `de ${profileName}` : `inconnu`} (${fromE164}) — lead non identifié`;
-      const matchSection = match ? `
-<ul style="list-style: none; padding-left: 0;">
-  <li>• <strong>Prospect</strong> : ${match.contactName || profileName || '(non renseigné)'}</li>
-  <li>• <strong>Numéro WhatsApp</strong> : ${fromE164}${profileName ? ` (profil : ${profileName})` : ''}</li>
-  <li>• <strong>Programme</strong> : ${match.programName || '—'} (id ${match.programId})</li>
-  <li>• <strong>Lien Adlead</strong> : <a href="${adleadUrl}">${adleadUrl}</a></li>
-</ul>` : `
-<p>⚠️ <strong>Aucun lead trouvé avec ce numéro</strong> (${fromE164}). Soit la relance auto n'a jamais été envoyée à ce numéro, soit le formatage du téléphone diffère côté Adlead vs WhatsApp.</p>
-<ul style="list-style: none; padding-left: 0;">
-  <li>• <strong>Numéro WhatsApp</strong> : ${fromE164}</li>
-  <li>• <strong>Profil WhatsApp</strong> : ${profileName || '—'}</li>
-</ul>`;
-      const notifHtml = `
-<!doctype html><html lang="fr"><body style="font-family: Arial, sans-serif; font-size: 14px; color: #222; line-height: 1.55;">
-<p>Bonjour Norman,</p>
-<p>Un prospect ${match ? `(<strong>${contactDisplay}</strong>) ` : ''}vient de répondre par <strong>WhatsApp</strong> à une relance auto sur <strong>${programDisplay}</strong>.</p>
-${matchSection}
-<h3 style="margin-top: 24px;">Message du client :</h3>
-<blockquote style="border-left: 3px solid #25D366; padding: 10px 12px; color: #222; background: #f6fff8; border-radius: 4px;">
-  ${body.replace(/\n/g, '<br>')}
-</blockquote>
-${autoReply ? (autoReply.sent ? `
-<h3 style="margin-top: 24px;">🤖 Réponse auto envoyée au prospect :</h3>
-<blockquote style="border-left: 3px solid #128C7E; padding: 10px 12px; color: #222; background: #f0fbf9; border-radius: 4px;">
-  ${String(autoReply.text).replace(/\n/g, '<br>')}
-</blockquote>
-${autoReply.note ? `<p style="color:#666; font-size:13px;">Note agent : ${autoReply.note}</p>` : ''}
-<p style="font-size:13px; color:#666;">Si la réponse ne te convient pas, réponds toi-même au prospect pour corriger.</p>` : `
-<p style="margin-top: 24px; padding: 12px; background: #fdecea; border-left: 4px solid #d93025; border-radius: 4px;">
-  🤖 <strong>Pas de réponse auto envoyée</strong> — à traiter manuellement.${autoReply.error ? ` (erreur : ${autoReply.error})` : ''}${autoReply.note ? `<br>Raison : ${autoReply.note}` : ''}
-</p>`) : ''}
-${match ? `<p style="margin-top: 24px; padding: 12px; background: #fff8dc; border-left: 4px solid #f0c000; border-radius: 4px;">
-  ⚠️ <strong>Pense à poser une action côté Adlead</strong> pour bloquer le lead (sinon un autre commercial peut le récupérer).
-</p>` : ''}
-<p style="color: #888; font-size: 12px; margin-top: 24px;">— Reply Watcher WhatsApp · Twilio incoming (sid: ${msgSid || 'n/a'})</p>
-</body></html>`;
-
-      try {
-        await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, notifSubject, notifHtml);
-        console.log(`[webhook/whatsapp-incoming] ✅ mail récap envoyé à ${CONFIG.INTERNAL_NOTIF_EMAIL}`);
-      } catch (e) {
-        console.error(`[webhook/whatsapp-incoming] ⚠️ mail récap échec: ${e.message}`);
-      }
-
-      // 5b. WhatsApp à Norman (notif urgente courte sur son téléphone)
-      if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
-        try {
-          const autoReplyWaLine = autoReply
-            ? (autoReply.sent
-                ? `\n\n🤖 Réponse auto envoyée :\n"${String(autoReply.text).slice(0, 250)}${autoReply.text.length > 250 ? '…' : ''}"`
-                : `\n\n🤖 Pas de réponse auto (à traiter)${autoReply.error ? ` — erreur : ${autoReply.error}` : autoReply.note ? ` — ${autoReply.note}` : ''}`)
-            : '';
-          const waBody = match
-            ? `📱 RÉPONSE WhatsApp PROSPECT — ACTION ADLEAD URGENTE\n\n• Prospect : ${contactDisplay}\n• Programme : ${match.programName || '—'}\n• Numéro : ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"${autoReplyWaLine}\n\n→ Adlead : ${adleadUrl}`
-            : `📱 WhatsApp inconnu ${profileName ? `(${profileName})` : ''} — ${fromE164}\n\nMessage :\n"${body.slice(0, 250)}${body.length > 250 ? '…' : ''}"\n\n(pas matché à un lead — voir mail)`;
-          const resp = await sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, waBody);
-          console.log(`[webhook/whatsapp-incoming] ✅ WhatsApp Norman envoyé (sid: ${resp.sid})`);
-        } catch (e) {
-          console.error(`[webhook/whatsapp-incoming] ⚠️ WhatsApp Norman échec: ${e.message}`);
-        }
-      }
-
-      // (Notif Telegram retirée : avec la coexistence WhatsApp, Norman voit les messages
-      //  nativement dans son app → la notif faisait doublon.)
-
-      // 6. Sales-action Adlead "Réponse WhatsApp reçue" (seulement si lead matché)
-      if (match) {
-        try {
-          await inboxWatcher.createAdleadReplySalesAction({
-            programId: match.programId,
-            leadId: match.leadId,
-            category: 'whatsapp_reply',
-            reasoning: `Réponse WhatsApp du prospect : ${body.slice(0, 200)}`,
-          });
-          console.log(`[webhook/whatsapp-incoming] ✅ sales-action Adlead créée sur lead ${match.leadId}`);
-        } catch (e) {
-          console.error(`[webhook/whatsapp-incoming] ⚠️ sales-action Adlead échec: ${e.message}`);
-        }
-      }
-
-      // 7. Trace dans processedLeads pour audit dashboard (idempotent par msgSid)
-      if (msgSid && processedLeads.some(l => l.whatsappMessageSid === msgSid)) {
-        console.log(`[webhook/whatsapp-incoming] msgSid ${msgSid} déjà présent — retry Twilio ignoré`);
-        return;
-      }
-      processedLeads.push({
-        id: `wa-reply-${msgSid || Date.now()}`,
-        status: 'whatsapp_reply_received',
-        leadId: match ? match.leadId : null,
-        programId: match ? match.programId : null,
-        programName: match ? match.programName : null,
-        contactName: match ? match.contactName : null,
-        whatsappFrom: fromE164,
-        whatsappBody: body,
-        whatsappMessageSid: msgSid,
-        whatsappProfileName: profileName,
-        relatedSentId: match ? match.id : null,
-        matched: !!match,
-        autoReplied: !!(autoReply && autoReply.sent),
-        receivedAt: new Date().toISOString(),
-        processedAt: new Date().toISOString(),
-      });
-      saveProcessed();
-    } catch (err) {
-      console.error('[webhook/whatsapp-incoming] erreur traitement:', err.message, err.stack);
-    }
-  });
-});
+// ─── WEBHOOK Twilio "WhatsApp incoming" — SUPPRIME (2026-09-15) ──────────────
+// Twilio a ete decommissionne le 2026-07-06 et WHATSAPP_PROVIDER=meta depuis la
+// migration. Les reponses prospect arrivent desormais par /webhook/whatsapp-meta,
+// qui appelle processInboundWhatsApp() — laquelle porte maintenant l'agent de
+// reponse automatique (voir l'etape 5 de cette fonction).
 
 // ─── START ──────────────────────────────────────────────────────────────────
 app.listen(CONFIG.PORT, () => {
@@ -5273,6 +5241,26 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
       dayNumber, channel, email, subject, whatsappTo,
       dryRun: !!dryRun, sendDisabled: !!sendDisabled,
     };
+  }
+
+  // Récap au commercial — une seule fois par cycle J+15 (jour 1), best-effort.
+  if (dayNumber === 1) {
+    try {
+      await sendLeadHandoverEmail({
+        stage: 'j15',
+        lead,
+        contact,
+        programId: record.programId,
+        leadId: record.leadId,
+        programName,
+        ville: (programmeEntry && programmeEntry.ville) || '',
+        promoteur: (programmeEntry && programmeEntry.promoteur) || '',
+        receivedAt: record.receivedAt || record.processedAt,
+        dayNumber,
+      });
+    } catch (e) {
+      console.error(`[j15] ⚠️ récap handover échoué lead ${record.leadId}: ${e.message}`);
+    }
   }
 
   // Envoi réel.
@@ -5710,6 +5698,27 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
       dayNumber, channel, email, subject, whatsappTo,
       dryRun: !!dryRun, sendDisabled: !!sendDisabled,
     };
+  }
+
+  // Récap au commercial — une seule fois par cycle J+3 (jour 1), best-effort :
+  // un échec ici ne doit pas empêcher la relance prospect de partir.
+  if (dayNumber === 1) {
+    try {
+      await sendLeadHandoverEmail({
+        stage: 'j3',
+        lead,
+        contact,
+        programId: record.programId,
+        leadId: record.leadId,
+        programName,
+        ville: (programmeEntry && programmeEntry.ville) || '',
+        promoteur: (programmeEntry && programmeEntry.promoteur) || '',
+        receivedAt: record.receivedAt || record.processedAt,
+        dayNumber,
+      });
+    } catch (e) {
+      console.error(`[j3m] ⚠️ récap handover échoué lead ${record.leadId}: ${e.message}`);
+    }
   }
 
   // Envoi réel.
@@ -6511,7 +6520,7 @@ async function waWindowExpiryAlert() {
     const msg = `⏰ Fenêtre WA expire dans ${remaining}h\n${name} (${prog})\nRéponds avant fermeture !`;
 
     if (CONFIG.WHATSAPP_ENABLED && CONFIG.INTERNAL_NOTIF_PHONE) {
-      sendWhatsAppViaTwilio(CONFIG.INTERNAL_NOTIF_PHONE, msg)
+      sendWhatsApp(CONFIG.INTERNAL_NOTIF_PHONE, msg)
         .catch(e => console.error('[wa-expiry] WA erreur:', e.message));
     }
     console.log(`[wa-expiry] alerte envoyée — ${name} (${prog}), fenêtre expire dans ${remaining}h`);
