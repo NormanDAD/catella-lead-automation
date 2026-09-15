@@ -543,10 +543,16 @@ async function callClaude({ systemPrompt, userMessage, maxTokens = 1500 }) {
       'content-type':      'application/json',
     },
     body: JSON.stringify({
-      model:      CONFIG.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      model:      CONFIG.ANTHROPIC_MODEL || 'claude-opus-5',
       max_tokens: maxTokens,
       system:     systemPrompt,
       messages:   [{ role: 'user', content: userMessage }],
+      // Sur les modeles recents (Fable 5, Opus 5) le raisonnement est actif par
+      // defaut et ses tokens sont decomptes de max_tokens. Pour nos taches —
+      // classer une reponse, rediger 2 phrases WhatsApp — l'effort 'low' suffit
+      // largement, divise la latence et evite que le budget parte en reflexion
+      // au point de tronquer le JSON de sortie.
+      output_config: { effort: 'low' },
     }),
   });
   if (!res.ok) {
@@ -757,7 +763,7 @@ async function draftWhatsAppReply({ incomingBody, leadContext = {}, programConte
   const raw = await callClaude({
     systemPrompt,
     userMessage: userMsg,
-    maxTokens:   600,
+    maxTokens:   4000,
   });
   try {
     const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();

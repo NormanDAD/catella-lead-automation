@@ -200,11 +200,11 @@ const CONFIG = {
   STATUS_UPDATE_ENABLED: process.env.STATUS_UPDATE_ENABLED !== 'false',
   // ── Reply handler (Graph device-code + Claude) ───────────────────────────
   // ANTHROPIC_API_KEY        : clé API pour l'appel Claude Sonnet
-  // ANTHROPIC_MODEL          : id modèle (default claude-sonnet-4-6)
+  // ANTHROPIC_MODEL          : id modèle (default claude-opus-5)
   // REPLY_HANDLER_ENABLED    : master switch — si false, poll() ne fait rien
   // REPLY_POLL_INTERVAL_MS   : fréquence poll inbox (default 3 min)
   ANTHROPIC_API_KEY:       process.env.ANTHROPIC_API_KEY || '',
-  ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+  ANTHROPIC_MODEL:         process.env.ANTHROPIC_MODEL || 'claude-opus-5',
   REPLY_HANDLER_ENABLED:   process.env.REPLY_HANDLER_ENABLED === 'true',
   REPLY_POLL_INTERVAL_MS:  Number(process.env.REPLY_POLL_INTERVAL_MS || 3 * 60 * 1000),
   // ── Webhook Power Automate "Reply Watcher" ───────────────────────────────
