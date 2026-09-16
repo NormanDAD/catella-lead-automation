@@ -118,12 +118,11 @@ const CONFIG = {
   // Si défini → envoi en mode ContentSid+ContentVariables (templates Meta-approved).
   //   Variables : {{1}} = prénom, {{2}} = nom du programme.
   // À renseigner sur Railway dès que le template passe "Approved" côté Meta.
-  TWILIO_TEMPLATE_RELANCE_J1: process.env.TWILIO_TEMPLATE_RELANCE_J1 || '',
   // ── Relance J+15 (récupération de leads en stagnation) ───────────────────
   // Cron quotidien qui relance les leads dont le statut Adlead est "pending"
   // ("En attente de contact") et dont la dernière action commerciale date de
   // plus de J15_DELAY_DAYS jours. Kill switch global via J15_ENABLED.
-  // WhatsApp J+15 gated via WHATSAPP_J15_ENABLED + TWILIO_TEMPLATE_J16 (template jour 2 = J+16).
+  // WhatsApp J+15 commande par WHATSAPP_J15_ENABLED seul (template Meta relance_j16_catella code en dur).
   J15_ENABLED:           process.env.J15_ENABLED === 'true',
   J15_DELAY_DAYS:        Number(process.env.J15_DELAY_DAYS || 15),
   J15_CRON_HOUR_PARIS:   Number(process.env.J15_CRON_HOUR_PARIS || 10),
@@ -142,7 +141,6 @@ const CONFIG = {
   // (Norman a repris la main sur le J+1).
   J1_AUTO_SEND_DISABLED: process.env.J1_AUTO_SEND_DISABLED === 'true',
   // ContentSid Twilio du template Meta "relance_j16_catella" (jour 2 de règle 3)
-  TWILIO_TEMPLATE_J16:   process.env.TWILIO_TEMPLATE_J16 || '',
   // ── Fenêtre horaire d'envoi ──────────────────────────────────────────────
   // Règle Norman : aucun envoi à un prospect en dehors de 9h-20h Paris,
   // et aucun envoi le dimanche (toute la journée). Voir isWithinAllowedSendHours().
@@ -162,7 +160,6 @@ const CONFIG = {
   WHATSAPP_J3M_ENABLED:  process.env.WHATSAPP_J3M_ENABLED === 'true',
   // ContentSid Twilio du template Meta "relance_j3m_day2_catella" (jour 2 = WhatsApp).
   // Si vide → fallback email pour le jour 2 (ne casse pas le cycle).
-  TWILIO_TEMPLATE_J3M_DAY2: process.env.TWILIO_TEMPLATE_J3M_DAY2 || '',
   // Webhook Twilio "incoming WhatsApp" : Twilio nous POSTe à /webhook/whatsapp-incoming
   // dès qu'un prospect répond sur notre numéro WhatsApp Business. On le secure par
   // signature Twilio HMAC (X-Twilio-Signature) — pas d'env var requis (le secret est
@@ -2269,21 +2266,13 @@ async function processPendingLead(entry) {
             ville,
             lien_rdv: CONFIG.BOOKING_URL,
           });
-          const _j1BrochureUrl = getBrochureUrl(programName);
-          const sendOptions = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? {
-            templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
-            contentVariables: {
-              "1": firstname || 'bonjour',
-              "2": programName || 'votre projet',
-              ...(_j1BrochureUrl ? { "3": _j1BrochureUrl } : {}),
-            },
-          } : {};
-          // Meta Cloud API : template relance_j1_catella → {{1}}=nom complet, {{2}}=programme, {{3}}=lien agenda
-          sendOptions.meta = { template: 'relance_j1_catella', params: [contact.fullname || firstname || 'bonjour', programName || 'votre projet'] };
+          // Meta Cloud API : template relance_j1_catella → {{1}}=nom complet, {{2}}=programme
+          const sendOptions = {
+            meta: { template: 'relance_j1_catella', params: [contact.fullname || firstname || 'bonjour', programName || 'votre projet'] },
+          };
           const resp = await sendWhatsApp(phoneE164, body, sendOptions);
           whatsappSid = resp && resp.sid ? resp.sid : null;
-          const mode = CONFIG.TWILIO_TEMPLATE_RELANCE_J1 ? 'template' : 'body';
-          console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (mode: ${mode}, sid: ${whatsappSid})`);
+          console.log(`[process] ✅ WhatsApp envoyé à ${phoneE164} (template relance_j1_catella, sid: ${whatsappSid})`);
           try {
             await createAdleadRecord(entry.programId, entry.leadId, 'sms', 'WhatsApp envoyé');
             console.log(`[process] ✅ record Adlead créé (WhatsApp J+1) lead ${entry.leadId}`);
@@ -2425,17 +2414,14 @@ app.get('/api/health', (req, res) => {
       j15DelayDays: CONFIG.J15_DELAY_DAYS,
       j15CronHourParis: CONFIG.J15_CRON_HOUR_PARIS,
       j15WhatsappEnabled: CONFIG.WHATSAPP_J15_ENABLED,
-      j15WhatsappReady: CONFIG.WHATSAPP_J15_ENABLED && !!CONFIG.TWILIO_TEMPLATE_J16,
+      j15WhatsappReady: CONFIG.WHATSAPP_J15_ENABLED,
       j3mEnabled: CONFIG.J3M_ENABLED,
       j3mSendDisabled: CONFIG.J3M_SEND_DISABLED,
       j3mCronHourParis: CONFIG.J3M_CRON_HOUR_PARIS,
       j3mWhatsappEnabled: CONFIG.WHATSAPP_J3M_ENABLED,
-      j3mTemplateDay2Configured: !!CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
       j1AutoSendDisabled: CONFIG.J1_AUTO_SEND_DISABLED,
-      j16TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_J16,
       // J+1 WhatsApp
       j1WhatsappEnabled: CONFIG.WHATSAPP_ENABLED,
-      j1TemplateConfigured: !!CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
       twilioConfigured: !!(CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN && CONFIG.TWILIO_WHATSAPP_FROM),
       metaAppSecretConfigured: !!CONFIG.META_APP_SECRET,
     },
@@ -3632,12 +3618,6 @@ app.post('/api/admin/retry-whatsapp-failed', async (req, res) => {
         const firstName = splitName(record.contactName || '').firstname || '';
         const brochureUrl = getBrochureUrl(record.programName);
         const resp = await sendWhatsApp(record.whatsappTo, '', {
-          templateSid: CONFIG.TWILIO_TEMPLATE_RELANCE_J1,
-          contentVariables: {
-            '1': firstName || 'bonjour',
-            '2': record.programName || 'votre projet',
-            ...(brochureUrl ? { '3': brochureUrl } : {}),
-          },
           meta: { template: 'relance_j1_catella', params: [record.contactName || firstName || 'bonjour', record.programName || 'votre projet'] },
         });
         record.whatsappSid = resp.sid || null;
@@ -5146,7 +5126,9 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
     channel = 'email';
     ({ subject, html } = buildJ15Day1Email(salutation, programName, accroche));
   } else if (dayNumber === 2) {
-    if (CONFIG.WHATSAPP_J15_ENABLED && CONFIG.TWILIO_TEMPLATE_J16) {
+    // Provider Meta : le nom du template est code en dur plus bas
+    // (relance_j16_catella). WHATSAPP_J15_ENABLED suffit donc a commander l'envoi.
+    if (CONFIG.WHATSAPP_J15_ENABLED) {
       channel = 'whatsapp';
       whatsappTo = normalizePhoneE164(contact.phone || record.whatsappTo);
     } else {
@@ -5184,8 +5166,6 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
         const _j16BrochureUrl = getBrochureUrl(programName);
         const _j16Name = (contact.fullname || salutation || '').trim();
         const r = await sendWhatsApp(whatsappTo, '', {
-          templateSid: CONFIG.TWILIO_TEMPLATE_J16,
-          contentVariables: { '1': _j16Name, '2': programName, ...(_j16BrochureUrl ? { '3': _j16BrochureUrl } : {}) },
           meta: { template: 'relance_j16_catella', params: [_j16Name || 'bonjour', programName] },
         });
         whatsappSid = r?.sid || null;
@@ -5582,7 +5562,8 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
     channel = 'email';
     ({ subject, html } = buildJ3MEmailDay1(salutation, programName, accroche));
   } else if (dayNumber === 2) {
-    if (CONFIG.WHATSAPP_J3M_ENABLED && CONFIG.TWILIO_TEMPLATE_J3M_DAY2) {
+    // Provider Meta : template relance_j3m_day2_catella code en dur plus bas.
+    if (CONFIG.WHATSAPP_J3M_ENABLED) {
       channel = 'whatsapp';
       whatsappTo = normalizePhoneE164(contact.phone || record.whatsappTo);
     } else {
@@ -5622,8 +5603,6 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
         const _j3mBrochureUrl = getBrochureUrl(programName);
         const _j3mName = (contact.fullname || salutation || '').trim();
         const r = await sendWhatsApp(whatsappTo, '', {
-          templateSid: CONFIG.TWILIO_TEMPLATE_J3M_DAY2,
-          contentVariables: { '1': _j3mName, '2': programName, ...(_j3mBrochureUrl ? { '3': _j3mBrochureUrl } : {}) },
           meta: { template: 'relance_j3m_day2_catella', params: [_j3mName || 'bonjour', programName] },
         });
         whatsappSid = r?.sid || null;
