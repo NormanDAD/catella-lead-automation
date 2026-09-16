@@ -4721,18 +4721,6 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
   // Pas de notif Telegram sur WhatsApp entrant : avec la coexistence, Norman voit le
   // message nativement dans son app WhatsApp Business → la notif ferait doublon.
 
-  // Sales-action Adlead (stoppe les relances)
-  if (match) {
-    try {
-      await inboxWatcher.createAdleadReplySalesAction({
-        programId: match.programId, leadId: match.leadId,
-        category: 'whatsapp_reply',
-        reasoning: `Réponse WhatsApp du prospect : ${String(body).slice(0, 200)}`,
-      });
-      console.log(`[inbound-wa] ✅ sales-action Adlead posée (lead ${match.leadId})`);
-    } catch (e) { console.error(`[inbound-wa] sales-action échec: ${e.message}`); }
-  }
-
   // 3. Historique conversationnel AVANT de persister le message courant, pour que
   //    l'agent recoive les echanges precedents et pas le message qu'il doit traiter.
   const history = processedLeads
@@ -4772,16 +4760,29 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
   //    l'envoi part en texte libre — gratuit, pas de template. L'idempotence par
   //    msgId est deja assuree par le early-return en tete de fonction.
   //    Couper : WHATSAPP_AUTO_REPLY_ENABLED=false.
+  let agentReply = null;
   if (CONFIG.WHATSAPP_AUTO_REPLY_ENABLED && CONFIG.WHATSAPP_ENABLED
       && CONFIG.ANTHROPIC_API_KEY && match) {
     try {
       const prog = findProgramme(match.programName) || {};
+      // Civilite : le record WhatsApp ne stocke que contactName, sans titre.
+      // On rapatrie le lead pour obtenir Monsieur/Madame + NOM, comme les emails.
+      // Best-effort : Adlead renvoie parfois 429, on ne bloque jamais la reponse.
+      let salutation = 'Madame, Monsieur';
+      try {
+        const leadFull = await fetchLead(match.leadId, { programId: match.programId });
+        const contact  = leadFull?.contacts?.[0];
+        if (contact) salutation = buildSalutation(contact);
+      } catch (e) {
+        console.warn(`[inbound-wa] civilite indisponible (${e.message}) → "Madame, Monsieur"`);
+      }
+
       const leadCtx = {
         leadId:      match.leadId,
         programId:   match.programId,
         contactName: match.contactName || profileName || null,
         programName: match.programName || null,
-        salutation:  match.contactName || profileName || null,
+        salutation,
       };
       const programCtx = {
         name:        match.programName || null,
@@ -4812,6 +4813,7 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
           processedAt:  new Date().toISOString(),
         });
         saveProcessed();
+        agentReply = draft.text;
         console.log(`[inbound-wa] 🤖 reponse auto envoyee a ${fromE164} : "${draft.text.slice(0, 120)}"`);
       } else {
         console.log(`[inbound-wa] 🤖 pas de reponse auto (shouldReply=false) : ${draft.internalNote || '—'}`);
@@ -4830,6 +4832,23 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
         `⚠️ Aucune reponse automatique n'est partie — a traiter a la main.`
       ).catch(() => {});
     }
+  }
+
+  // 6. Action commerciale Adlead — type SMS, avec un resume de l'echange.
+  //    Posee EN DERNIER pour que le resume puisse inclure la reponse de l'agent.
+  //    Elle fait bouger le lead cote Adlead, ce qui stoppe les cadences J+1/J+3/J+15.
+  if (match) {
+    const resume = agentReply
+      ? `Prospect : "${String(body).slice(0, 180)}" — Reponse envoyee : "${String(agentReply).slice(0, 180)}"`
+      : `Prospect : "${String(body).slice(0, 300)}" — pas de reponse automatique, a traiter.`;
+    try {
+      await inboxWatcher.createAdleadReplySalesAction({
+        programId: match.programId, leadId: match.leadId,
+        category: 'whatsapp_reply',
+        reasoning: resume,
+      });
+      console.log(`[inbound-wa] ✅ action SMS Adlead posee (lead ${match.leadId})`);
+    } catch (e) { console.error(`[inbound-wa] action Adlead echec: ${e.message}`); }
   }
 }
 

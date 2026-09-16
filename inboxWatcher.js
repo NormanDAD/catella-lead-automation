@@ -704,12 +704,14 @@ TON NORMAN (impératif) :
 - Style WhatsApp : court et naturel. 1 à 3 phrases maximum. Pas de pavé.
 - Pas de formules creuses ("N'hésitez pas", "Je reste à votre disposition").
 - Pas d'emojis. Pas de markdown, pas de HTML — texte brut uniquement.
-- Pas de salutation lourde type "Cher Monsieur". Un simple "Bonjour {prénom/nom fourni}," suffit, ou rien si la conversation est déjà engagée.
+- Salutation : "Bonjour " suivi de la SALUTATION FOURNIE dans le contexte (ex. "Bonjour Monsieur Codaccioni,"). N'utilise JAMAIS le prénom seul, et n'invente jamais une civilité. Si la salutation fournie est "Madame, Monsieur", écris "Bonjour," tout court. Si la conversation est déjà engagée, pas de salutation du tout.
+- Vouvoiement et civilité (Monsieur / Madame + NOM) en toutes circonstances.
 - Tu peux terminer par "— Norman" mais pas de bloc signature.
 
 RÈGLES CRITIQUES — NE JAMAIS LES VIOLER (un message client réel part automatiquement) :
 - N'INVENTE JAMAIS : prix d'un lot, date exacte de livraison, disponibilité précise, typologie/étage/orientation/parking d'un lot, surface précise, TVA, dispositif fiscal (Pinel/LMNP), frais de notaire, rentabilité, montant de loyer.
 - Si le prospect demande du CONCRET (prix, dispo, plan d'un lot, date de livraison, simulation fiscale…) → NE DONNE PAS de chiffre. Réponds qu'on regarde ça ensemble lors d'un échange rapide et propose le lien de RDV.
+- N'AFFIRME JAMAIS qu'il reste des lots, ni qu'il n'en reste plus, même de façon vague ("il me reste des 3 pièces", "nous avons encore du stock"). Tu n'as AUCUNE donnée de disponibilité. Formule toujours au conditionnel de la vérification : "je regarde ce qui est disponible et je reviens vers vous", ou propose le RDV.
 - Si négociation prix → ni concession ni refus sec : propose un échange de vive voix.
 - Tu peux donner les infos GÉNÉRALES déjà fournies dans le contexte programme ci-dessous (nom, ville, promoteur, accroche) et partager le lien brochure s'il existe et que c'est pertinent.
 - Si le prospect demande une brochure / des plans / "plus d'infos" → partage le lien brochure s'il est fourni, sinon propose un RDV.
@@ -977,18 +979,23 @@ async function createAdleadReplySalesAction({ programId, leadId, category, reaso
   const label = LABEL_FOR_CATEGORY[category] || category;
   const scheduled_at = toAdleadDateTime(new Date(Date.now() + 5 * 60 * 1000));
   const comment = `Réponse prospect — ${label}. ${reasoning || ''}`.slice(0, 500);
-  // Adlead n'accepte pas forcément "email-received" dans l'énum → on essaie, retry en send-email.
-  try {
-    return await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
-      type: 'email-received',
-      scheduled_at, priority: 'medium', comment,
-    });
-  } catch (e) {
-    return await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
-      type: 'send-email',
-      scheduled_at, priority: 'medium', comment,
-    });
+  // Demande Norman (2026-09-16) : les echanges WhatsApp sont consignes en type SMS
+  // cote Adlead, avec un resume de l'echange en commentaire.
+  // L'enum Adlead n'est pas documentee : on tente les variantes du plus precis au
+  // plus generique, puis on retombe sur les types email qui, eux, sont connus pour
+  // passer — mieux vaut une action consignee sous un type imparfait qu'aucune trace.
+  const types = ['sms-received', 'send-sms', 'sms', 'email-received', 'send-email'];
+  let lastErr;
+  for (const type of types) {
+    try {
+      const r = await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
+        type, scheduled_at, priority: 'medium', comment,
+      });
+      if (type !== 'sms-received') console.log(`[adlead] sales-action posee en type "${type}"`);
+      return r;
+    } catch (e) { lastErr = e; }
   }
+  throw lastErr;
 }
 
 function toAdleadDateTime(d) {
