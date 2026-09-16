@@ -4817,7 +4817,18 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
         console.log(`[inbound-wa] 🤖 pas de reponse auto (shouldReply=false) : ${draft.internalNote || '—'}`);
       }
     } catch (e) {
+      // Alerte : sans ca, une panne de l'agent (credits Anthropic epuises, rate
+      // limit, JSON illisible) est totalement silencieuse — il se tait et
+      // personne ne le sait. C'est exactement ce qui s'est produit le 15/09.
       console.error(`[inbound-wa] 🤖 agent auto-reply echec: ${e.message}`);
+      sendTelegram(
+        `🤖❌ AGENT WHATSAPP EN ECHEC\n\n` +
+        `Prospect : ${match.contactName || fromE164}\n` +
+        `Programme : ${match.programName || '—'}\n` +
+        `Message : "${String(body).slice(0, 200)}"\n\n` +
+        `Erreur : ${e.message}\n\n` +
+        `⚠️ Aucune reponse automatique n'est partie — a traiter a la main.`
+      ).catch(() => {});
     }
   }
 }

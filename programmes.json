@@ -470,5 +470,13 @@
     "departement": "6",
     "promoteur": "AZUR REALISATION",
     "accroche": "À Grasse, VILLA ROSALIA par AZUR REALISATION vous installe au cœur de la capitale mondiale du parfum, dans un écrin provençal authentique."
+  },
+  "LE 13 DOLLFUS": {
+    "nom_commercial": "LE 13 DOLLFUS",
+    "ville": "Paris 18",
+    "code_postal": "75018",
+    "departement": "75",
+    "promoteur": "Proderim",
+    "accroche": "Dans le 18ᵉ, LE 13 DOLLFUS par Proderim s'installe rue Jean Dollfus, à deux pas de la Porte de Saint-Ouen et des commerces du quartier, dans une adresse résidentielle calme et bien desservie."
   }
 }
