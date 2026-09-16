@@ -56,7 +56,13 @@ const CONFIG = {
   // que META_APP_SECRET n'est pas encore connu). Repasser true dès que possible.
   META_WEBHOOK_VALIDATE:  process.env.META_WEBHOOK_VALIDATE !== 'false',
   ADLEAD_UI_BASE:        process.env.ADLEAD_UI_BASE || 'https://crm.adlead.immo/catella',
+  // URL reelle de l'agenda Bookings — cible de la redirection /rdv.
+  // Elle n'est JAMAIS collee dans un message : les messages utilisent BOOKING_LINK.
   BOOKING_URL:           process.env.BOOKING_URL || 'https://outlook.office.com/bookwithme/user/923d6c795e8a44b8b1703578fea6c819@catella.com/meetingtype/61-yOXWp3EmR-JEFDg44vA2?anonymous',
+  // Base publique du service, pour construire le lien court.
+  PUBLIC_BASE_URL:       (process.env.PUBLIC_BASE_URL
+                          || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '')
+                          || 'https://lead-automation-production-33e8.up.railway.app').replace(/\/$/, ''),
   DELAY_HOURS:           Number(process.env.DELAY_HOURS || 24),
   SCHEDULER_INTERVAL_MS: Number(process.env.SCHEDULER_INTERVAL_MS || 5 * 60 * 1000),
   // Liste d'IDs de programmes (CSV) où Norman est le commercial et traite lui-même
@@ -241,6 +247,12 @@ const CONFIG = {
 const RUNTIME_STATS = {
   registrationsFailClosed: 0, // leads bloqués parce que /registrations inaccessible
 };
+
+// Lien court de prise de RDV, servi par GET /rdv (302 vers CONFIG.BOOKING_URL).
+// Motif : l'URL Bookings fait ~160 caracteres, impossible a caser dans un SMS et
+// disgracieuse partout ailleurs. Le lien court est stable : changer d'agenda ne
+// demande que de mettre a jour BOOKING_URL, aucun message n'est a retoucher.
+CONFIG.BOOKING_LINK = `${CONFIG.PUBLIC_BASE_URL}/rdv`;
 
 // Set pour lookup O(1) dans enqueueLead
 const INSTANT_PROGRAM_SET = new Set(CONFIG.INSTANT_PROGRAM_IDS);
@@ -2136,7 +2148,7 @@ async function processPendingLead(entry) {
       ville,
       promoteur,
       accroche_programme: accroche,
-      lien_rdv: CONFIG.BOOKING_URL,
+      lien_rdv: CONFIG.BOOKING_LINK,
       brochureUrl: getBrochureUrl(programName),
     };
 
@@ -2264,7 +2276,7 @@ async function processPendingLead(entry) {
             fullname: contact.fullname || '',
             programme: programName,
             ville,
-            lien_rdv: CONFIG.BOOKING_URL,
+            lien_rdv: CONFIG.BOOKING_LINK,
           });
           // Meta Cloud API : template relance_j1_catella → {{1}}=nom complet, {{2}}=programme
           const sendOptions = {
@@ -2291,7 +2303,7 @@ async function processPendingLead(entry) {
     if (isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
       try {
         const firstname = splitName(contact.fullname || '').firstname || '';
-        const smsBody = buildSMSBody({ firstname, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+        const smsBody = buildSMSBody({ firstname, programme: programName, lien_rdv: CONFIG.BOOKING_LINK });
         const smsResp = await sendSMSViaTwilio(whatsappTo, smsBody);
         smsSid = smsResp?.sid || null;
         console.log(`[process] ✅ SMS fallback envoyé à ${whatsappTo} lead ${entry.leadId} (sid: ${smsSid})`);
@@ -4652,6 +4664,17 @@ app.post('/webhook/twilio-status', express.urlencoded({ extended: false }), (req
 // branché en phase d'envoi ; ici on logge et on ACK pour valider l'onboarding.
 
 // GET : vérification du webhook (Meta/Dualhook appelle avec hub.mode/hub.verify_token/hub.challenge)
+// Lien court de prise de rendez-vous. Public (aucune authentification) : c'est
+// l'URL que recoivent les prospects. 302 vers l'agenda Bookings configure.
+app.get('/rdv', (req, res) => {
+  if (!CONFIG.BOOKING_URL) {
+    console.warn('[rdv] BOOKING_URL non configuree — redirection impossible');
+    return res.status(503).send('Prise de rendez-vous temporairement indisponible.');
+  }
+  console.log(`[rdv] redirection vers l'agenda (ref: ${req.query.r || '-'})`);
+  return res.redirect(302, CONFIG.BOOKING_URL);
+});
+
 app.get('/webhook/whatsapp-meta', (req, res) => {
   const mode      = req.query['hub.mode'];
   const token     = req.query['hub.verify_token'];
@@ -4800,15 +4823,15 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
         // Bouton "Prendre rendez-vous" plutot que l'URL brute collee dans le texte :
         // le lien Bookings fait ~150 caracteres et fait tache dans un fil WhatsApp.
         // Repli en texte simple si l'interactif echoue, pour ne jamais perdre la reponse.
-        const wantsCta = !!draft.cta && !!CONFIG.BOOKING_URL;
+        const wantsCta = !!draft.cta && !!CONFIG.BOOKING_LINK;
         let resp;
         try {
           resp = await sendWhatsApp(fromE164, draft.text,
-            wantsCta ? { ctaUrl: CONFIG.BOOKING_URL, ctaText: 'Prendre rendez-vous' } : {});
+            wantsCta ? { ctaUrl: CONFIG.BOOKING_LINK, ctaText: 'Prendre rendez-vous' } : {});
         } catch (e) {
           if (!wantsCta) throw e;
           console.warn(`[inbound-wa] bouton CTA refuse (${e.message}) → repli en texte`);
-          resp = await sendWhatsApp(fromE164, `${draft.text}\n\n${CONFIG.BOOKING_URL}`);
+          resp = await sendWhatsApp(fromE164, `${draft.text}\n\n${CONFIG.BOOKING_LINK}`);
         }
         processedLeads.push({
           id:           `wa-autoreply-${msgId || Date.now()}`,
@@ -5184,7 +5207,7 @@ async function processJ15Candidate(record, { dryRun = false, sendDisabled = fals
   let smsSid = null, smsError = null;
   if (channel === 'whatsapp' && isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
     try {
-      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_LINK });
       const r = await sendSMSViaTwilio(whatsappTo, smsBody);
       smsSid = r?.sid || null;
       console.log(`[j15] ✅ SMS fallback envoyé à ${whatsappTo} lead ${record.leadId}`);
@@ -5621,7 +5644,7 @@ async function processJ3MCandidate(record, { dryRun = false, sendDisabled = fals
   let smsSid = null, smsError = null;
   if (channel === 'whatsapp' && isSMSFallbackEligible(whatsappError) && CONFIG.SMS_FALLBACK_ENABLED && whatsappTo) {
     try {
-      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_URL });
+      const smsBody = buildSMSBodyRelance({ firstname: firstName, programme: programName, lien_rdv: CONFIG.BOOKING_LINK });
       const r = await sendSMSViaTwilio(whatsappTo, smsBody);
       smsSid = r?.sid || null;
       console.log(`[j3m] ✅ SMS fallback envoyé à ${whatsappTo} lead ${record.leadId}`);

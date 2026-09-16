@@ -639,7 +639,9 @@ EXIGENCES sur "html" :
 - Pas de signature, pas de "Norman DADON" à la fin`;
 
 async function draftResponse({ category, classification, replyBody, replySubject, leadContext = {}, programContext = {} }) {
-  const bookingUrl = CONFIG.BOOKING_URL || '';
+  // Lien court (/rdv) plutot que l'URL Bookings brute : meme cible, mais lisible
+  // dans un message et modifiable sans retoucher les templates.
+  const bookingUrl = CONFIG.BOOKING_LINK || CONFIG.BOOKING_URL || '';
   const systemPrompt = DRAFT_PROMPT.replaceAll('{{BOOKING_URL}}', bookingUrl);
   const salutation = leadContext.salutation
     || leadContext.contactName
@@ -739,7 +741,9 @@ FORMAT DE SORTIE — JSON strict, rien avant, rien après :
 }`;
 
 async function draftWhatsAppReply({ incomingBody, leadContext = {}, programContext = {}, history = [] }) {
-  const bookingUrl = CONFIG.BOOKING_URL || '';
+  // Lien court (/rdv) plutot que l'URL Bookings brute : meme cible, mais lisible
+  // dans un message et modifiable sans retoucher les templates.
+  const bookingUrl = CONFIG.BOOKING_LINK || CONFIG.BOOKING_URL || '';
   const systemPrompt = WHATSAPP_REPLY_PROMPT.replaceAll('{{BOOKING_URL}}', bookingUrl);
   const salutation = leadContext.salutation
     || leadContext.contactName
