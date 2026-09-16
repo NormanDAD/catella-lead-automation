@@ -713,7 +713,11 @@ TON NORMAN (impératif) :
 RÈGLES CRITIQUES — NE JAMAIS LES VIOLER (un message client réel part automatiquement) :
 - N'INVENTE JAMAIS : prix d'un lot, date exacte de livraison, disponibilité précise, typologie/étage/orientation/parking d'un lot, surface précise, TVA, dispositif fiscal (Pinel/LMNP), frais de notaire, rentabilité, montant de loyer.
 - Si le prospect demande du CONCRET (prix, dispo, plan d'un lot, date de livraison, simulation fiscale…) → NE DONNE PAS de chiffre. Réponds qu'on regarde ça ensemble lors d'un échange rapide et propose le lien de RDV.
-- N'AFFIRME JAMAIS qu'il reste des lots, ni qu'il n'en reste plus, même de façon vague ("il me reste des 3 pièces", "nous avons encore du stock"). Tu n'as AUCUNE donnée de disponibilité. Formule toujours au conditionnel de la vérification : "je regarde ce qui est disponible et je reviens vers vous", ou propose le RDV.
+- DISPONIBILITÉS ET PRIX : tu peux — et tu dois — t'appuyer sur le bloc "Stock disponible" ci-dessous, qui est relevé à l'instant. Tu peux donc annoncer le nombre de lots restants par typologie, la fourchette de prix et les surfaces qui y figurent.
+- MAIS tu ne cites RIEN qui ne soit pas écrit dans ce bloc. Pas d'étage, pas d'orientation, pas de lot précis, pas de plan, pas de date de livraison, pas de simulation fiscale : ces informations n'y sont pas. Pour tout cela, propose le rendez-vous.
+- Si le bloc indique que la donnée est indisponible, ou si la typologie demandée n'y figure pas, n'affirme RIEN sur les disponibilités : dis que tu vérifies et propose le rendez-vous.
+- N'extrapole jamais une fourchette : si le bloc dit "de 285 000 € à 670 000 €", ne dis pas "autour de 400 000 €".
+- Les prix annoncés sont TTC et indicatifs : mentionne-le sobrement quand tu donnes un prix.
 - Si négociation prix → ni concession ni refus sec : propose un échange de vive voix.
 - Tu peux donner les infos GÉNÉRALES déjà fournies dans le contexte programme ci-dessous (nom, ville, promoteur, accroche) et partager le lien brochure s'il existe et que c'est pertinent.
 - Si le prospect demande une brochure / des plans / "plus d'infos" → partage le lien brochure s'il est fourni, sinon propose un RDV.
@@ -762,6 +766,9 @@ async function draftWhatsAppReply({ incomingBody, leadContext = {}, programConte
     `Promoteur          : ${programContext.promoteur || '(inconnu)'}`,
     `Accroche programme : ${programContext.accroche || '(aucune)'}`,
     `Lien brochure      : ${programContext.brochureUrl || '(aucun)'}`,
+    ``,
+    `=== Stock disponible (source Adlead, a l'instant) ===`,
+    programContext.stockSummary || '(donnee de stock indisponible — ne rien affirmer sur les disponibilites ni les prix)',
     ``,
     `=== Historique de la conversation WhatsApp (du plus ancien au plus récent) ===`,
     historyBlock,

@@ -1067,6 +1067,46 @@ async function findVendorActionSince(programId, leadId, sinceMs) {
   return null;
 }
 
+// Met en forme le stock Adlead pour l'agent WhatsApp.
+// La donnee vient du champ `stock` de /programs/{id} : un agregat PAR TYPOLOGIE,
+// pas un lot par lot. `stock_level` = disponibles, `stock` = total au catalogue.
+// Renvoie null si rien d'exploitable — l'agent reste alors sur l'interdiction
+// d'affirmer quoi que ce soit sur les disponibilites.
+function buildStockSummary(program) {
+  const rows = Array.isArray(program && program.stock) ? program.stock : [];
+  const housing = rows.filter(r => r.is_housing !== false);
+  if (!housing.length) return null;
+
+  const eur = (n) => Number(n).toLocaleString('fr-FR', { maximumFractionDigits: 0 }) + ' €';
+  const lines = [];
+  let anyAvailable = false;
+
+  for (const r of housing) {
+    const label = r.typology_display || r.typology || '?';
+    const dispo = Number(r.stock_level || 0);
+    if (dispo <= 0) { lines.push(`- ${label} : plus aucun disponible`); continue; }
+    anyAvailable = true;
+
+    // Prix TTC uniquement — c'est ce qu'un prospect comprend. Adlead renvoie 0
+    // quand la grille n'est pas renseignee : dans ce cas on n'annonce aucun prix.
+    const pmin = Number(r.price_including_vat_min || 0);
+    const pmax = Number(r.price_including_vat_max || 0);
+    const prix = pmin > 0
+      ? (pmax > pmin ? `de ${eur(pmin)} à ${eur(pmax)}` : `à partir de ${eur(pmin)}`)
+      : 'prix non communiqué';
+
+    const amin = parseFloat(r.living_area_min), amax = parseFloat(r.living_area_max);
+    const surf = Number.isFinite(amin) && amin > 0
+      ? (Number.isFinite(amax) && amax > amin ? `, ${amin.toFixed(0)} à ${amax.toFixed(0)} m²` : `, ${amin.toFixed(0)} m²`)
+      : '';
+
+    lines.push(`- ${label} : ${dispo} disponible${dispo > 1 ? 's' : ''}, ${prix}${surf}`);
+  }
+  if (!lines.length) return null;
+  if (!anyAvailable) lines.push('(aucun lot disponible sur ce programme actuellement)');
+  return lines.join('\n');
+}
+
 async function fetchProgram(programId) {
   if (!programId) return null;
   try {
@@ -4809,12 +4849,25 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
         programName: match.programName || null,
         salutation,
       };
+      // Stock reel, recupere a chaud : c'est ce qui autorise l'agent a annoncer
+      // des disponibilites et des prix au lieu de rester evasif. Best-effort —
+      // si Adlead ne repond pas, stockSummary reste null et l'agent retombe sur
+      // l'interdiction d'affirmer quoi que ce soit.
+      let stockSummary = null;
+      try {
+        const programApi = await fetchProgram(match.programId);
+        stockSummary = buildStockSummary(programApi);
+      } catch (e) {
+        console.warn(`[inbound-wa] stock indisponible (${e.message}) → agent sans donnees`);
+      }
+
       const programCtx = {
         name:        match.programName || null,
         ville:       prog.ville || null,
         promoteur:   prog.promoteur || null,
         accroche:    prog.accroche || null,
         brochureUrl: getBrochureUrl(match.programName),
+        stockSummary,
       };
 
       const draft = await inboxWatcher.draftWhatsAppReply({
