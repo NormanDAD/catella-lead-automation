@@ -1383,6 +1383,18 @@ async function sendEmailViaPowerAutomate(to, subject, htmlBody) {
 // Sandbox : le destinataire doit avoir envoyé "join <code>" au numéro sandbox.
 // Prod    : templates Meta approuvés requis pour messages sortants hors fenêtre 24h.
 
+// Cle de comparaison d'un numero : CHIFFRES UNIQUEMENT.
+// Ne jamais utiliser pour envoyer — voir normalizePhoneE164 pour ca.
+//
+// Pourquoi : Twilio livrait les entrants en "+33669525559", Meta Cloud API les
+// livre en "33664582411" (sans "+"). L'ancienne normalisation conservait le "+",
+// donc depuis la bascule Meta AUCUN entrant ne matchait son lead : mesure sur
+// 476 messages — 106/119 matches (89 %) sur les numeros avec "+", 0/357 (0 %)
+// sur ceux sans. Comparer sur les chiffres seuls rend les deux formats egaux.
+function phoneKey(s) {
+  return String(s || '').replace(/\D/g, '');
+}
+
 function normalizePhoneE164(raw, defaultCountryCode = '33') {
   if (!raw) return null;
   const digits = String(raw).replace(/[^\d+]/g, '');
@@ -3285,7 +3297,7 @@ app.post('/api/admin/backfill-whatsapp-replies', async (req, res) => {
     processedLeads.filter(l => l.whatsappMessageSid).map(l => l.whatsappMessageSid)
   );
 
-  const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const normalizeForMatch = phoneKey;
 
   // Récupère TOUTES les pages (pas de filtre To — on filtre en local)
   let allMessages = [];
@@ -3382,7 +3394,7 @@ app.post('/api/admin/rebuild-wa-conversations', async (req, res) => {
     processedLeads.flatMap(l => [l.whatsappSid, l.whatsappMessageSid].filter(Boolean))
   );
 
-  const normalizePhone = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const normalizePhone = phoneKey;
 
   // Index pendingLeads par numéro normalisé pour enrichir le contexte
   const phoneIndex = {};
@@ -3511,7 +3523,7 @@ app.post('/api/admin/rebuild-wa-conversations', async (req, res) => {
 // Backfille programName / contactName manquants sur les records WA en scannant
 // les corps de messages (templates résolus stockés par Twilio).
 app.post('/api/admin/enrich-wa-records', (req, res) => {
-  const normPhone = s => String(s || '').replace(/[^\d+]/g, '');
+  const normPhone = phoneKey;
 
   // Grouper par numéro de téléphone
   const byPhone = {};
@@ -4222,9 +4234,9 @@ app.post('/api/whatsapp/reply', async (req, res) => {
   if (!CONFIG.TWILIO_ACCOUNT_SID) return res.status(503).json({ error: 'Twilio non configuré' });
 
   // Vérification fenêtre 24h Meta côté serveur
-  const normTo = String(to).replace(/[^\d+]/g, '');
+  const normTo = phoneKey(to);
   const lastInbound = processedLeads
-    .filter(l => l.status === 'whatsapp_reply_received' && l.whatsappFrom && String(l.whatsappFrom).replace(/[^\d+]/g, '') === normTo)
+    .filter(l => l.status === 'whatsapp_reply_received' && l.whatsappFrom && phoneKey(l.whatsappFrom) === normTo)
     .map(l => l.receivedAt || l.processedAt)
     .sort()
     .pop();
@@ -4691,7 +4703,7 @@ function validateMetaSignature(req) {
 // Match le lead, notifie Norman (Telegram), pose une sales-action Adlead (= le lead bouge
 // → les règles J+1/J+3/J+15 s'arrêtent), et persiste pour le dashboard. Idempotent par msgId.
 async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
-  const norm = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const norm = phoneKey;
   const fromNorm = norm(fromE164);
   if (msgId && processedLeads.some(l => l.whatsappMessageSid === msgId)) {
     console.log(`[inbound-wa] msg ${msgId} déjà traité — skip`);
@@ -4814,7 +4826,7 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
 // On l'enregistre pour garder l'historique conversationnel complet. Idempotent par echoId.
 function recordWhatsAppEcho({ toE164, body, echoId }) {
   if (echoId && processedLeads.some(l => l.whatsappMessageSid === echoId)) return;
-  const norm = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const norm = phoneKey;
   const toNorm = norm(toE164);
   let match = null;
   for (let i = processedLeads.length - 1; i >= 0; i--) {
@@ -6160,7 +6172,7 @@ async function pollWhatsAppReplies() {
   const existingSids = new Set(
     processedLeads.filter(l => l.whatsappMessageSid).map(l => l.whatsappMessageSid)
   );
-  const normalizeForMatch = (s) => String(s || '').replace(/[^\d+]/g, '');
+  const normalizeForMatch = phoneKey;
 
   // Date de début : dernière exécution ou 90 jours en arrière (premier lancement)
   const since = meta.lastPollAt
