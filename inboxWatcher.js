@@ -724,13 +724,17 @@ CAS shouldReply = false (on NE répond PAS automatiquement, on laisse Norman gé
 - Demande qui exige une décision commerciale que seul Norman peut prendre.
 Dans ces cas, mets shouldReply=false et explique pourquoi dans internalNote.
 
-LIEN DE RDV (à insérer tel quel quand tu proposes un créneau) :
-{{BOOKING_URL}}
+LIEN DE RDV — NE LE COLLE JAMAIS DANS LE TEXTE :
+Quand tu proposes un rendez-vous, mets simplement "cta": true dans ta sortie JSON.
+Un bouton "Prendre rendez-vous" sera automatiquement joint au message. N'ecris
+donc aucune URL d'agenda dans "text" : tu formules l'invitation en mots
+("le plus simple est d'en parler quelques minutes"), le bouton fait le reste.
 
 FORMAT DE SORTIE — JSON strict, rien avant, rien après :
 {
   "shouldReply": <true|false>,
-  "text": "<le message WhatsApp en texte brut, ou \\"\\" si shouldReply=false>",
+  "cta": <true|false — true si tu proposes un rendez-vous, un bouton sera joint>,
+  "text": "<le message WhatsApp en texte brut, SANS aucune URL d'agenda, ou \\"\\" si shouldReply=false>",
   "internalNote": "<1 phrase FR pour Norman : ce que l'agent a répondu et pourquoi, ou la raison du non-envoi>"
 }`;
 
@@ -772,6 +776,7 @@ async function draftWhatsAppReply({ incomingBody, leadContext = {}, programConte
     const parsed = JSON.parse(cleaned);
     return {
       shouldReply:  !!parsed.shouldReply,
+      cta:          !!parsed.cta,
       text:         (parsed.text || '').trim(),
       internalNote: parsed.internalNote || '',
     };

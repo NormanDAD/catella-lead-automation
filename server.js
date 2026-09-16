@@ -1488,7 +1488,7 @@ function metaAppSecretProof() {
  *  - Texte libre (session 24h ouverte, ex: auto-reply) : { text: "..." }
  * Renvoie { sid, raw } — `sid` = id du message Meta (compat avec les call-sites Twilio).
  */
-async function sendWhatsAppViaMetaCloud(toE164, { templateName, bodyParams, text, lang = 'fr' } = {}) {
+async function sendWhatsAppViaMetaCloud(toE164, { templateName, bodyParams, text, lang = 'fr', ctaUrl, ctaText } = {}) {
   if (!CONFIG.META_WHATSAPP_TOKEN || !CONFIG.META_PHONE_NUMBER_ID) {
     throw new Error('Credentials Meta Cloud API non configurés (META_WHATSAPP_TOKEN / META_PHONE_NUMBER_ID)');
   }
@@ -1506,6 +1506,25 @@ async function sendWhatsAppViaMetaCloud(toE164, { templateName, bodyParams, text
             parameters: bodyParams.map(v => ({ type: 'text', text: String(v ?? '') })),
           }],
         } : {}),
+      },
+    };
+  } else if (ctaUrl) {
+    // Message interactif a bouton (cta_url) : le prospect voit un bouton tappable
+    // et l'URL n'apparait pas dans le fil. Autorise dans la fenetre de service de
+    // 24 h, donc gratuit au meme titre qu'un message texte de session.
+    // Limites Meta : body <= 1024 caracteres, libelle du bouton <= 20.
+    payload = {
+      messaging_product: 'whatsapp', to, type: 'interactive',
+      interactive: {
+        type: 'cta_url',
+        body: { text: String(text || '').slice(0, 1024) },
+        action: {
+          name: 'cta_url',
+          parameters: {
+            display_text: String(ctaText || 'Prendre rendez-vous').slice(0, 20),
+            url: ctaUrl,
+          },
+        },
       },
     };
   } else {
@@ -1537,7 +1556,8 @@ async function sendWhatsApp(toE164, body = '', options = {}) {
     if (options.meta && options.meta.template) {
       return sendWhatsAppViaMetaCloud(toE164, { templateName: options.meta.template, bodyParams: options.meta.params || [] });
     }
-    return sendWhatsAppViaMetaCloud(toE164, { text: body }); // session libre (auto-reply)
+    // session libre (auto-reply) — avec bouton CTA si demande par l'appelant
+    return sendWhatsAppViaMetaCloud(toE164, { text: body, ctaUrl: options.ctaUrl, ctaText: options.ctaText });
   }
   return sendWhatsAppViaTwilio(toE164, body, options);
 }
@@ -4797,7 +4817,19 @@ async function processInboundWhatsApp({ fromE164, body, profileName, msgId }) {
       });
 
       if (draft.shouldReply && draft.text) {
-        const resp = await sendWhatsApp(fromE164, draft.text);
+        // Bouton "Prendre rendez-vous" plutot que l'URL brute collee dans le texte :
+        // le lien Bookings fait ~150 caracteres et fait tache dans un fil WhatsApp.
+        // Repli en texte simple si l'interactif echoue, pour ne jamais perdre la reponse.
+        const wantsCta = !!draft.cta && !!CONFIG.BOOKING_URL;
+        let resp;
+        try {
+          resp = await sendWhatsApp(fromE164, draft.text,
+            wantsCta ? { ctaUrl: CONFIG.BOOKING_URL, ctaText: 'Prendre rendez-vous' } : {});
+        } catch (e) {
+          if (!wantsCta) throw e;
+          console.warn(`[inbound-wa] bouton CTA refuse (${e.message}) → repli en texte`);
+          resp = await sendWhatsApp(fromE164, `${draft.text}\n\n${CONFIG.BOOKING_URL}`);
+        }
         processedLeads.push({
           id:           `wa-autoreply-${msgId || Date.now()}`,
           status:       'whatsapp_reply_sent',
