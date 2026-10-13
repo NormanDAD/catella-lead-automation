@@ -240,6 +240,9 @@ const CONFIG = {
   //   seule côté Adlead, aucun envoi prospect. Indépendant de PIPELINE_DISABLED
   //   et d'EXCLUDED_PROGRAM_IDS (couvre 100 % des programmes).
   LATE_NOTIF_ENABLED: process.env.LATE_NOTIF_ENABLED === 'true',
+  // Destinataire du récap : boîte Catella demandée par Norman (INTERNAL_NOTIF_EMAIL
+  // pointe sur Gmail, où un filtre archive ces mails hors boîte de réception).
+  LATE_NOTIF_EMAIL: process.env.LATE_NOTIF_EMAIL || 'norman.dadon@catella.com',
   ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
   // Mot de passe dashboard. Si vide → pas d'auth (rétrocompat dev local).
   DASHBOARD_PASSWORD:    process.env.DASHBOARD_PASSWORD || '',
@@ -6386,7 +6389,15 @@ async function lateDigestCron({ force = false } = {}) {
     let errors = 0;
     for (const w of due) {
       try {
-        const r = await checkLateLead(w);
+        let r;
+        try {
+          r = await checkLateLead(w);
+        } catch (e) {
+          // Quota Adlead dépassé : une pause puis un second essai.
+          if (!/ 429 /.test(e.message)) throw e;
+          await new Promise(res => setTimeout(res, 20_000));
+          r = await checkLateLead(w);
+        }
         if (r.late) late.push({ ...w, ...r });
         done.add(w);
       } catch (e) {
@@ -6395,7 +6406,7 @@ async function lateDigestCron({ force = false } = {}) {
         else errors++;
         console.log(`[late] lead ${w.leadId} — vérif impossible: ${String(e.message).slice(0, 100)}`);
       }
-      await new Promise(r => setTimeout(r, 400)); // ménage le quota Adlead
+      await new Promise(r => setTimeout(r, 1000)); // ménage le quota Adlead
     }
 
     if (late.length > 0) {
@@ -6424,7 +6435,7 @@ ${rows}
 ${errors > 0 ? `<p style="color:#a00;">${errors} lead(s) n'ont pas pu être vérifiés (API Adlead) : ils seront repris au prochain récap.</p>` : ''}
 <p style="color:#888;font-size:11px;">Chaque contact n'apparaît qu'une fois. Le nom ouvre la fiche Adlead.</p>
 </div>`;
-      await sendEmailViaPowerAutomate(CONFIG.INTERNAL_NOTIF_EMAIL, `⏰ ${late.length} contact(s) en retard — récap ${hour}h`, html);
+      await sendEmailViaPowerAutomate(CONFIG.LATE_NOTIF_EMAIL, `⏰ ${late.length} contact(s) en retard — récap ${hour}h`, html);
       console.log(`[late] ✅ récap ${hour}h envoyé : ${late.length} en retard, ${due.length - late.length - errors} pris en main, ${errors} erreur(s)`);
     } else {
       console.log(`[late] récap ${hour}h : aucun nouveau retard (${due.length} vérifié(s), ${errors} erreur(s))`);
