@@ -543,10 +543,16 @@ async function callClaude({ systemPrompt, userMessage, maxTokens = 1500 }) {
       'content-type':      'application/json',
     },
     body: JSON.stringify({
-      model:      CONFIG.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      model:      CONFIG.ANTHROPIC_MODEL || 'claude-opus-5',
       max_tokens: maxTokens,
       system:     systemPrompt,
       messages:   [{ role: 'user', content: userMessage }],
+      // Sur les modeles recents (Fable 5, Opus 5) le raisonnement est actif par
+      // defaut et ses tokens sont decomptes de max_tokens. Pour nos taches —
+      // classer une reponse, rediger 2 phrases WhatsApp — l'effort 'low' suffit
+      // largement, divise la latence et evite que le budget parte en reflexion
+      // au point de tronquer le JSON de sortie.
+      output_config: { effort: 'low' },
     }),
   });
   if (!res.ok) {
@@ -633,7 +639,9 @@ EXIGENCES sur "html" :
 - Pas de signature, pas de "Norman DADON" à la fin`;
 
 async function draftResponse({ category, classification, replyBody, replySubject, leadContext = {}, programContext = {} }) {
-  const bookingUrl = CONFIG.BOOKING_URL || '';
+  // Lien court (/rdv) plutot que l'URL Bookings brute : meme cible, mais lisible
+  // dans un message et modifiable sans retoucher les templates.
+  const bookingUrl = CONFIG.BOOKING_LINK || CONFIG.BOOKING_URL || '';
   const systemPrompt = DRAFT_PROMPT.replaceAll('{{BOOKING_URL}}', bookingUrl);
   const salutation = leadContext.salutation
     || leadContext.contactName
@@ -679,6 +687,116 @@ async function draftResponse({ category, classification, replyBody, replySubject
       shouldDraft:  false,
       html:         '',
       internalNote: `Erreur parsing LLM: ${e.message}`,
+    };
+  }
+}
+
+// ─── AGENT WHATSAPP — RÉPONSE AUTO CONTEXTUELLE ───────────────────────────
+// Agent dédié qui répond directement au prospect en WhatsApp, dans le contexte
+// du message reçu et du dossier (programme/ville/promoteur/accroche/brochure).
+// Contrairement au flow email (brouillon Outlook relu par Norman), ce texte
+// PEUT partir automatiquement — d'où les garde-fous renforcés ci-dessous.
+const WHATSAPP_REPLY_PROMPT = `Tu es l'assistant commercial de Norman Dadon, Directeur des ventes chez Catella Residential (commercialisation de logements neufs). Tu réponds À SA PLACE, en son nom, aux messages WhatsApp de prospects immobiliers.
+
+Ta réponse est envoyée DIRECTEMENT au prospect par WhatsApp (pas de relecture humaine). Sois donc irréprochable et prudent.
+
+TON NORMAN (impératif) :
+- Direct, chaleureux, professionnel. Jamais robotique ni obséquieux.
+- Vouvoiement systématique.
+- Style WhatsApp : court et naturel. 1 à 3 phrases maximum. Pas de pavé.
+- Pas de formules creuses ("N'hésitez pas", "Je reste à votre disposition").
+- Pas d'emojis. Pas de markdown, pas de HTML — texte brut uniquement.
+- Salutation : "Bonjour " suivi de la SALUTATION FOURNIE dans le contexte (ex. "Bonjour Monsieur Codaccioni,"). N'utilise JAMAIS le prénom seul, et n'invente jamais une civilité. Si la salutation fournie est "Madame, Monsieur", écris "Bonjour," tout court. Si la conversation est déjà engagée, pas de salutation du tout.
+- Vouvoiement et civilité (Monsieur / Madame + NOM) en toutes circonstances.
+- Tu peux terminer par "— Norman" mais pas de bloc signature.
+
+RÈGLES CRITIQUES — NE JAMAIS LES VIOLER (un message client réel part automatiquement) :
+- N'INVENTE JAMAIS : prix d'un lot, date exacte de livraison, disponibilité précise, typologie/étage/orientation/parking d'un lot, surface précise, TVA, dispositif fiscal (Pinel/LMNP), frais de notaire, rentabilité, montant de loyer.
+- Si le prospect demande du CONCRET (prix, dispo, plan d'un lot, date de livraison, simulation fiscale…) → NE DONNE PAS de chiffre. Réponds qu'on regarde ça ensemble lors d'un échange rapide et propose le lien de RDV.
+- DISPONIBILITÉS ET PRIX : tu peux — et tu dois — t'appuyer sur le bloc "Stock disponible" ci-dessous, qui est relevé à l'instant. Tu peux donc annoncer le nombre de lots restants par typologie, la fourchette de prix et les surfaces qui y figurent.
+- MAIS tu ne cites RIEN qui ne soit pas écrit dans ce bloc. Pas d'étage, pas d'orientation, pas de lot précis, pas de plan, pas de date de livraison, pas de simulation fiscale : ces informations n'y sont pas. Pour tout cela, propose le rendez-vous.
+- Si le bloc indique que la donnée est indisponible, ou si la typologie demandée n'y figure pas, n'affirme RIEN sur les disponibilités : dis que tu vérifies et propose le rendez-vous.
+- N'extrapole jamais une fourchette : si le bloc dit "de 285 000 € à 670 000 €", ne dis pas "autour de 400 000 €".
+- Les prix annoncés sont TTC et indicatifs : mentionne-le sobrement quand tu donnes un prix.
+- Si négociation prix → ni concession ni refus sec : propose un échange de vive voix.
+- Tu peux donner les infos GÉNÉRALES déjà fournies dans le contexte programme ci-dessous (nom, ville, promoteur, accroche) et partager le lien brochure s'il existe et que c'est pertinent.
+- Si le prospect demande une brochure / des plans / "plus d'infos" → partage le lien brochure s'il est fourni, sinon propose un RDV.
+- En cas de doute sur une info, ne l'affirme pas : propose le RDV.
+
+CAS shouldReply = false (on NE répond PAS automatiquement, on laisse Norman gérer) :
+- Désinscription / STOP / "arrêtez de me contacter" → shouldReply=false (note : Norman doit traiter le opt-out).
+- Insulte, spam, message incompréhensible ou hors-sujet total.
+- Réclamation sérieuse, litige, sujet juridique ou sensible.
+- Demande qui exige une décision commerciale que seul Norman peut prendre.
+Dans ces cas, mets shouldReply=false et explique pourquoi dans internalNote.
+
+LIEN DE RDV — NE LE COLLE JAMAIS DANS LE TEXTE :
+Quand tu proposes un rendez-vous, mets simplement "cta": true dans ta sortie JSON.
+Un bouton "Prendre rendez-vous" sera automatiquement joint au message. N'ecris
+donc aucune URL d'agenda dans "text" : tu formules l'invitation en mots
+("le plus simple est d'en parler quelques minutes"), le bouton fait le reste.
+
+FORMAT DE SORTIE — JSON strict, rien avant, rien après :
+{
+  "shouldReply": <true|false>,
+  "cta": <true|false — true si tu proposes un rendez-vous, un bouton sera joint>,
+  "text": "<le message WhatsApp en texte brut, SANS aucune URL d'agenda, ou \\"\\" si shouldReply=false>",
+  "internalNote": "<1 phrase FR pour Norman : ce que l'agent a répondu et pourquoi, ou la raison du non-envoi>"
+}`;
+
+async function draftWhatsAppReply({ incomingBody, leadContext = {}, programContext = {}, history = [] }) {
+  // Lien court (/rdv) plutot que l'URL Bookings brute : meme cible, mais lisible
+  // dans un message et modifiable sans retoucher les templates.
+  const bookingUrl = CONFIG.BOOKING_LINK || CONFIG.BOOKING_URL || '';
+  const systemPrompt = WHATSAPP_REPLY_PROMPT.replaceAll('{{BOOKING_URL}}', bookingUrl);
+  const salutation = leadContext.salutation
+    || leadContext.contactName
+    || '(pas de nom — ne pas mettre de nom dans la salutation)';
+
+  const historyBlock = (history && history.length)
+    ? history.map(h => `${h.direction === 'out' ? 'Norman' : 'Prospect'} : ${String(h.body || '').slice(0, 400)}`).join('\n')
+    : '(aucun échange précédent)';
+
+  const userMsg = [
+    `=== Dossier / contexte programme ===`,
+    `Contact            : ${leadContext.contactName || '(inconnu)'}`,
+    `Salutation à employer : ${salutation}`,
+    `Programme          : ${programContext.name || leadContext.programName || '(inconnu)'}`,
+    `Ville              : ${programContext.ville || '(inconnue)'}`,
+    `Promoteur          : ${programContext.promoteur || '(inconnu)'}`,
+    `Accroche programme : ${programContext.accroche || '(aucune)'}`,
+    `Lien brochure      : ${programContext.brochureUrl || '(aucun)'}`,
+    ``,
+    `=== Stock disponible (source Adlead, a l'instant) ===`,
+    programContext.stockSummary || '(donnee de stock indisponible — ne rien affirmer sur les disponibilites ni les prix)',
+    ``,
+    `=== Historique de la conversation WhatsApp (du plus ancien au plus récent) ===`,
+    historyBlock,
+    ``,
+    `=== Dernier message du prospect (à traiter) ===`,
+    incomingBody || '(vide)',
+  ].join('\n');
+
+  const raw = await callClaude({
+    systemPrompt,
+    userMessage: userMsg,
+    maxTokens:   4000,
+  });
+  try {
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      shouldReply:  !!parsed.shouldReply,
+      cta:          !!parsed.cta,
+      text:         (parsed.text || '').trim(),
+      internalNote: parsed.internalNote || '',
+    };
+  } catch (e) {
+    console.error(`[draftWhatsAppReply] parse error: ${e.message} — raw: ${raw.slice(0, 300)}`);
+    return {
+      shouldReply:  false,
+      text:         '',
+      internalNote: `Erreur parsing LLM: ${e.message} — aucune réponse auto envoyée, à traiter manuellement.`,
     };
   }
 }
@@ -877,18 +995,23 @@ async function createAdleadReplySalesAction({ programId, leadId, category, reaso
   const label = LABEL_FOR_CATEGORY[category] || category;
   const scheduled_at = toAdleadDateTime(new Date(Date.now() + 5 * 60 * 1000));
   const comment = `Réponse prospect — ${label}. ${reasoning || ''}`.slice(0, 500);
-  // Adlead n'accepte pas forcément "email-received" dans l'énum → on essaie, retry en send-email.
-  try {
-    return await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
-      type: 'email-received',
-      scheduled_at, priority: 'medium', comment,
-    });
-  } catch (e) {
-    return await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
-      type: 'send-email',
-      scheduled_at, priority: 'medium', comment,
-    });
+  // Demande Norman (2026-09-16) : les echanges WhatsApp sont consignes en type SMS
+  // cote Adlead, avec un resume de l'echange en commentaire.
+  // L'enum Adlead n'est pas documentee : on tente les variantes du plus precis au
+  // plus generique, puis on retombe sur les types email qui, eux, sont connus pour
+  // passer — mieux vaut une action consignee sous un type imparfait qu'aucune trace.
+  const types = ['sms-received', 'send-sms', 'sms', 'email-received', 'send-email'];
+  let lastErr;
+  for (const type of types) {
+    try {
+      const r = await helpers.adleadPost(`/programs/${programId}/leads/${leadId}/sales-actions`, {
+        type, scheduled_at, priority: 'medium', comment,
+      });
+      if (type !== 'sms-received') console.log(`[adlead] sales-action posee en type "${type}"`);
+      return r;
+    } catch (e) { lastErr = e; }
   }
+  throw lastErr;
 }
 
 function toAdleadDateTime(d) {
@@ -964,6 +1087,7 @@ module.exports = {
   matchReplyToRelance,
   classifyReply,
   draftResponse,
+  draftWhatsAppReply,
   createDraftInOutlook,
   createAdleadReplySalesAction,
   wrapWithSignature,

@@ -29,3 +29,12 @@ REPRISE-AU-REVEIL.md
 
 # Sous-dossiers obsolètes
 lead-automation-v2/
+
+# Config locale Claude Code (worktrees, settings, secrets potentiels)
+.claude/
+
+# Patches / diffs de brouillon locaux
+*.patch
+
+# Exports de contacts (données personnelles prospects — ne jamais commiter)
+contacts-*.csv
