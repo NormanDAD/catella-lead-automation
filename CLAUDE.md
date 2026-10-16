@@ -70,6 +70,19 @@ Séquence : 3 envois sur 3 jours — email "je classe ton dossier" → WhatsApp 
 Arrêt immédiat si `lead.status !== 'pending'`.
 Fenêtre : lundi–samedi 9h–20h Paris. Un lead skippé un dimanche est rattrapé le lundi.
 
+## Récap des leads en retard — NE PAS MODIFIER (règle Norman du 2026-10-16)
+
+> Remplace la règle du 2026-10-13 (récap toutes les 2 h, seuil 24 h, chaque lead signalé une seule fois). Ne pas modifier sans validation explicite de Norman.
+
+- **En retard** = 12 h (`LATE_DELAY_HOURS`) après l'arrivée du lead, sans traitement : statut de l'intérêt toujours **« Nouvel intérêt »** (`to-process`) **ou** passé à **« En attente de contact »** (`pending`) **sans aucune action commerciale** dans `/records` (appel, meeting, note, visite, email/SMS hors pipeline). Tout autre statut, une dénonciation ou un `discard_reason` = traité.
+- **Un seul mail par jour à 11h Paris** (`LATE_DIGEST_HOUR`), **tous les jours** (dimanche compris).
+- Le mail liste **tous** les leads en retard à cet instant : un lead non traité **réapparaît chaque matin** jusqu'à son traitement (sortie du suivi après 60 jours).
+- **100 % des programmes** : suivi alimenté par le webhook avant `EXCLUDED_PROGRAM_IDS`, fonctionne même avec `PIPELINE_DISABLED=true`. Lecture seule côté Adlead, aucun envoi prospect.
+- **Destinataires cibles : les commerciaux, Norman en copie** (`LATE_NOTIF_EMAIL`, séparés par `;`). En attendant leurs adresses : Norman seul.
+- **Expéditeur cible : `alexandre.chambault@catella.com`** (accord d'Alexandre, selon Norman) via `LATE_NOTIF_FROM`. ⚠️ À n'activer QUE lorsque (1) la délégation M365 « envoyer en tant que / de la part de » est accordée sur sa boîte et (2) l'URL du flow Power Automate a été régénérée avec un `POWER_AUTOMATE_SECRET` vérifié par le flow — sinon l'URL ouverte permettrait d'écrire au nom du patron.
+- Kill-switch : `LATE_NOTIF_ENABLED=false`. Admin : `GET /api/admin/late-watch`, `POST /api/admin/late-digest-now`. Fichier : `DATA_DIR/late_watch.json`.
+- Limite connue : le **vendeur affecté** n'est pas lisible avec la clé #223 (`GET .../sales-actions` → 403, scope `sales-action.view` à demander à Cédric).
+
 ## Templates email — NE PAS MODIFIER (figés le 2026-05-28)
 
 Structure identique sur les 7 templates (J+1, J+3 ×3, J+15 ×3). Ne jamais modifier sans validation Norman.

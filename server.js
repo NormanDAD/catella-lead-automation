@@ -235,14 +235,17 @@ const CONFIG = {
   //   aucun lead. Le webhook continue à encaisser (rien n'est perdu), mais
   //   ni mail prospect ni notif interne ni WhatsApp ne partent.
   PIPELINE_DISABLED: process.env.PIPELINE_DISABLED === 'true',
-  // LATE_NOTIF_ENABLED : récap des leads "en retard" (24 h sans action commerciale)
-  //   envoyé à INTERNAL_NOTIF_EMAIL toutes les 2 h de 8h à 22h (Paris). Lecture
-  //   seule côté Adlead, aucun envoi prospect. Indépendant de PIPELINE_DISABLED
-  //   et d'EXCLUDED_PROGRAM_IDS (couvre 100 % des programmes).
+  // LATE_NOTIF_ENABLED : récap quotidien des leads "en retard" (règle du 2026-10-16,
+  //   voir le bloc RÉCAP DES LEADS EN RETARD). Lecture seule côté Adlead, aucun
+  //   envoi prospect. Indépendant de PIPELINE_DISABLED et d'EXCLUDED_PROGRAM_IDS.
   LATE_NOTIF_ENABLED: process.env.LATE_NOTIF_ENABLED === 'true',
-  // Destinataire du récap : boîte Catella demandée par Norman (INTERNAL_NOTIF_EMAIL
-  // pointe sur Gmail, où un filtre archive ces mails hors boîte de réception).
+  // Destinataires du récap, séparés par ";" (cible : les commerciaux + Norman).
   LATE_NOTIF_EMAIL: process.env.LATE_NOTIF_EMAIL || 'norman.dadon@catella.com',
+  // Boîte expéditrice. Cible : alexandre.chambault@catella.com, UNIQUEMENT une fois
+  // la délégation M365 accordée ET POWER_AUTOMATE_SECRET vérifié par le flow.
+  LATE_NOTIF_FROM: process.env.LATE_NOTIF_FROM || '',
+  LATE_DELAY_HOURS: Number(process.env.LATE_DELAY_HOURS || 12),
+  LATE_DIGEST_HOUR: Number(process.env.LATE_DIGEST_HOUR || 11),
   ADMIN_UPLOAD_TOKEN:    process.env.ADMIN_UPLOAD_TOKEN || '',
   // Mot de passe dashboard. Si vide → pas d'auth (rétrocompat dev local).
   DASHBOARD_PASSWORD:    process.env.DASHBOARD_PASSWORD || '',
@@ -1413,7 +1416,7 @@ function brochureButton(url) {
 
 // ─── ENVOI VIA POWER AUTOMATE ───────────────────────────────────────────────
 
-async function sendEmailViaPowerAutomate(to, subject, htmlBody) {
+async function sendEmailViaPowerAutomate(to, subject, htmlBody, { from } = {}) {
   if (!CONFIG.POWER_AUTOMATE_URL) {
     throw new Error('POWER_AUTOMATE_URL non configuré');
   }
@@ -1421,7 +1424,7 @@ async function sendEmailViaPowerAutomate(to, subject, htmlBody) {
     to,
     subject,
     html: htmlBody,
-    from: CONFIG.SENDER_EMAIL,
+    from: from || CONFIG.SENDER_EMAIL,
   };
   const headers = { 'Content-Type': 'application/json' };
   if (CONFIG.POWER_AUTOMATE_SECRET) {
@@ -6282,15 +6285,26 @@ async function digestCron() {
 }
 setInterval(digestCron, 5 * 60 * 1000);
 
-// ─── RÉCAP DES LEADS EN RETARD (2026-10-13) ─────────────────────────────────
-// Demande Norman : un mail récapitulatif des contacts "en retard" toutes les 2 h
-// de 8h à 22h (Paris), sur 100 % des programmes. "En retard" = 24 h après
-// l'arrivée du lead, toujours sans action commerciale.
+// ─── RÉCAP DES LEADS EN RETARD (règle du 2026-10-16) ────────────────────────
+// Règle Norman, remplace celle du 13/10 (récap toutes les 2 h, 24 h) :
+// - En retard = LATE_DELAY_HOURS (12 h) après l'arrivée, sans traitement :
+//   statut toujours "Nouvel intérêt" (to-process) OU passé à "En attente de
+//   contact" (pending) sans aucune action commerciale dans Adlead.
+// - Un seul mail par jour à LATE_DIGEST_HOUR (11h Paris), tous les jours.
+// - Le mail liste TOUS les leads en retard à cet instant : un lead non traité
+//   réapparaît chaque matin jusqu'à son traitement.
+// - Destinataires : LATE_NOTIF_EMAIL. Expéditeur : LATE_NOTIF_FROM (cible :
+//   alexandre.chambault@catella.com, une fois la délégation M365 et le secret
+//   du flow en place), à défaut SENDER_EMAIL.
 // Liste de suivi distincte de pendingLeads : alimentée par le webhook AVANT le
-// filtre EXCLUDED_PROGRAM_IDS, et jamais consommée par le scheduler d'envoi.
-// Ce bloc ne fait que des GET Adlead et un seul envoi : le mail à Norman.
+// filtre EXCLUDED_PROGRAM_IDS (100 % des programmes), jamais consommée par le
+// scheduler d'envoi. Ce bloc ne fait que des GET Adlead et un seul envoi : le récap.
 const LATE_WATCH_FILE = path.join(DATA_DIR, 'late_watch.json');
-const LATE_DIGEST_HOURS = new Set([8, 10, 12, 14, 16, 18, 20, 22]);
+const LATE_WATCH_MAX_DAYS = 60; // au-delà, le lead sort du suivi
+const LATE_OPEN_STATUSES = new Map([
+  ['to-process', 'Nouvel intérêt'],
+  ['pending', 'En attente de contact'],
+]);
 const LATE_HANDLED_STATUSES = new Set([
   'ongoing', 'to-follow', 'interested', 'negotiating',
   'discarded', 'pending-purchaser', 'purchaser',
@@ -6301,19 +6315,19 @@ const LATE_HANDLED_STATUSES = new Set([
 // les éventuels événements d'intake des portails.
 const LATE_VENDOR_EVENT = /call|meeting|visit|appointment|voicemail|note|comment/;
 
-let lateWatch = loadJsonFile(LATE_WATCH_FILE, null);
-if (lateWatch === null) {
-  // Premier démarrage : on reprend le stock de la file d'attente (programmes
-  // actifs uniquement — les leads des programmes exclus n'y ont jamais été stockés).
-  lateWatch = CONFIG.LATE_NOTIF_ENABLED
-    ? pendingLeads.map(l => ({ interestId: l.interestId, leadId: l.leadId, programId: l.programId, receivedAt: l.receivedAt }))
-    : [];
-  if (CONFIG.LATE_NOTIF_ENABLED) {
-    saveJsonFile(LATE_WATCH_FILE, lateWatch);
-    console.log(`[late] suivi initialisé avec ${lateWatch.length} lead(s) repris de la file`);
-  }
-}
+let lateWatch = loadJsonFile(LATE_WATCH_FILE, []);
 function saveLateWatch() { saveJsonFile(LATE_WATCH_FILE, lateWatch); }
+if (CONFIG.LATE_NOTIF_ENABLED) {
+  // Reprend les leads de la file d'attente absents du suivi : la règle du 13/10
+  // retirait un lead après l'avoir signalé une fois, la nouvelle le garde.
+  const known = new Set(lateWatch.map(w => String(w.interestId)));
+  const added = pendingLeads.filter(l => l.interestId && !known.has(String(l.interestId)));
+  if (added.length > 0) {
+    lateWatch.push(...added.map(l => ({ interestId: l.interestId, leadId: l.leadId, programId: l.programId, receivedAt: l.receivedAt })));
+    saveLateWatch();
+  }
+  console.log(`[late] suivi : ${lateWatch.length} lead(s), dont ${added.length} repris de la file`);
+}
 
 function watchLateLead(payload) {
   if (!CONFIG.LATE_NOTIF_ENABLED) return;
@@ -6327,13 +6341,15 @@ function watchLateLead(payload) {
   saveLateWatch();
 }
 
-// Renvoie { late: false } si le lead a été pris en main, { late: true, ... } sinon.
+// Renvoie { late: false } si le lead a été traité, { late: true, ... } sinon.
 async function checkLateLead(w) {
   const lead = await fetchLead(w.leadId, { programId: w.programId });
   if (lead.is_under_prescription === true) return { late: false };
   if (LATE_HANDLED_STATUSES.has(lead.status) || lead.discard_reason) return { late: false };
   const interest = findInterest(lead, w.interestId);
-  if (interest && LATE_HANDLED_STATUSES.has(interest.status)) return { late: false };
+  // Statut de l'intérêt en priorité (c'est lui qu'affiche le control desk), sinon celui du lead.
+  const status = interest?.status || lead.status;
+  if (!LATE_OPEN_STATUSES.has(status)) return { late: false };
 
   if (w.programId) {
     // Les fiches anciennes ont des actions d'avant ce nouvel intérêt : on ne
@@ -6362,6 +6378,7 @@ async function checkLateLead(w) {
   const contact = (lead.contacts || [])[0] || {};
   return {
     late: true,
+    statusLabel: LATE_OPEN_STATUSES.get(status),
     name: [contact.title_display, contact.fullname || contact.display_name].filter(Boolean).join(' ') || '(sans nom)',
     phone: contact.phone1 || contact.phone2 || '',
     email: contact.email_primary || contact.email1 || contact.email2 || '',
@@ -6376,16 +6393,18 @@ async function lateDigestCron({ force = false } = {}) {
   if (lateRunning) return;
   const { ymd, hour } = getParisYmdAndHour();
   if (!force) {
-    if (!LATE_DIGEST_HOURS.has(hour)) return;
-    if (lateLastRunKey === `${ymd}-${hour}`) return;
+    if (hour !== CONFIG.LATE_DIGEST_HOUR) return;
+    if (lateLastRunKey === ymd) return;
   }
-  lateLastRunKey = `${ymd}-${hour}`;
+  lateLastRunKey = ymd;
   lateRunning = true;
   try {
     const now = Date.now();
-    const due = lateWatch.filter(w => new Date(w.receivedAt).getTime() + CONFIG.DELAY_HOURS * 3600_000 <= now);
+    // Sortie du suivi au-delà de LATE_WATCH_MAX_DAYS, traité ou non.
+    lateWatch = lateWatch.filter(w => now - new Date(w.receivedAt).getTime() < LATE_WATCH_MAX_DAYS * 86400_000);
+    const due = lateWatch.filter(w => new Date(w.receivedAt).getTime() + CONFIG.LATE_DELAY_HOURS * 3600_000 <= now);
     const late = [];
-    const done = new Set();
+    const handled = new Set();
     let errors = 0;
     for (const w of due) {
       try {
@@ -6399,10 +6418,10 @@ async function lateDigestCron({ force = false } = {}) {
           r = await checkLateLead(w);
         }
         if (r.late) late.push({ ...w, ...r });
-        done.add(w);
+        else handled.add(w);
       } catch (e) {
-        // 404 = lead/intérêt supprimé → on oublie. Autre erreur (429…) → réessai au prochain récap.
-        if (/ 404 /.test(e.message)) done.add(w);
+        // 404 = lead/intérêt supprimé → on oublie. Autre erreur → réessai demain.
+        if (/ 404 /.test(e.message)) handled.add(w);
         else errors++;
         console.log(`[late] lead ${w.leadId} — vérif impossible: ${String(e.message).slice(0, 100)}`);
       }
@@ -6412,37 +6431,41 @@ async function lateDigestCron({ force = false } = {}) {
     if (late.length > 0) {
       late.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
       const fmt = (iso) => new Date(iso).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const td = 'padding:6px 8px;border-bottom:1px solid #eee;';
       const rows = late.map(l => {
         const hours = Math.floor((now - new Date(l.receivedAt).getTime()) / 3600_000);
         const retard = hours >= 48 ? `${Math.floor(hours / 24)} j` : `${hours} h`;
         const url = `https://crm.adlead.immo/catella/control-desk/operations/leads-all/${l.leadId}`;
         return `<tr>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;"><a href="${url}">${escapeHtml(l.name)}</a></td>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;">${escapeHtml(l.programName)}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;white-space:nowrap;">${escapeHtml(l.phone)}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;">${escapeHtml(l.email)}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;white-space:nowrap;">${fmt(l.receivedAt)}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid #eee;white-space:nowrap;"><strong>${retard}</strong></td>
+          <td style="${td}"><a href="${url}">${escapeHtml(l.name)}</a></td>
+          <td style="${td}">${escapeHtml(l.programName)}</td>
+          <td style="${td}white-space:nowrap;">${escapeHtml(l.statusLabel)}</td>
+          <td style="${td}white-space:nowrap;">${escapeHtml(l.phone)}</td>
+          <td style="${td}">${escapeHtml(l.email)}</td>
+          <td style="${td}white-space:nowrap;">${fmt(l.receivedAt)}</td>
+          <td style="${td}white-space:nowrap;"><strong>${retard}</strong></td>
         </tr>`;
       }).join('');
       const th = (t) => `<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #333;">${t}</th>`;
       const html = `<div style="font-family:Arial,sans-serif;font-size:13px;color:#222;">
-<p>${late.length} contact(s) passé(s) en retard depuis le dernier récap : 24 h ou plus sans action commerciale dans Adlead.</p>
+<p>Bonjour,</p>
+<p>${late.length} lead(s) sans traitement depuis plus de ${CONFIG.LATE_DELAY_HOURS} h : statut « Nouvel intérêt », ou « En attente de contact » sans aucune action commerciale dans Adlead.</p>
 <table style="border-collapse:collapse;font-size:13px;">
-<tr>${th('Contact')}${th('Programme')}${th('Téléphone')}${th('Email')}${th('Arrivé le')}${th('Retard')}</tr>
+<tr>${th('Contact')}${th('Programme')}${th('Statut')}${th('Téléphone')}${th('Email')}${th('Arrivé le')}${th('Sans traitement depuis')}</tr>
 ${rows}
 </table>
-${errors > 0 ? `<p style="color:#a00;">${errors} lead(s) n'ont pas pu être vérifiés (API Adlead) : ils seront repris au prochain récap.</p>` : ''}
-<p style="color:#888;font-size:11px;">Chaque contact n'apparaît qu'une fois. Le nom ouvre la fiche Adlead.</p>
+${errors > 0 ? `<p style="color:#a00;">${errors} lead(s) n'ont pas pu être vérifiés (API Adlead) : ils seront repris demain.</p>` : ''}
+<p style="color:#888;font-size:11px;">Un lead reste dans ce récap tant qu'il n'est pas traité. Le nom ouvre la fiche Adlead.</p>
 </div>`;
-      await sendEmailViaPowerAutomate(CONFIG.LATE_NOTIF_EMAIL, `⏰ ${late.length} contact(s) en retard — récap ${hour}h`, html);
-      console.log(`[late] ✅ récap ${hour}h envoyé : ${late.length} en retard, ${due.length - late.length - errors} pris en main, ${errors} erreur(s)`);
+      const dateFr = new Date(now).toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
+      await sendEmailViaPowerAutomate(CONFIG.LATE_NOTIF_EMAIL, `Leads en retard — ${late.length} à traiter (${dateFr})`, html, { from: CONFIG.LATE_NOTIF_FROM || undefined });
+      console.log(`[late] ✅ récap ${ymd} envoyé : ${late.length} en retard, ${handled.size} traité(s), ${errors} erreur(s)`);
     } else {
-      console.log(`[late] récap ${hour}h : aucun nouveau retard (${due.length} vérifié(s), ${errors} erreur(s))`);
+      console.log(`[late] récap ${ymd} : aucun lead en retard (${due.length} vérifié(s), ${errors} erreur(s))`);
     }
 
-    // Retire les leads traités seulement après l'envoi : si le mail plante, ils restent pour le prochain récap.
-    lateWatch = lateWatch.filter(w => !done.has(w));
+    // Seuls les leads traités sortent du suivi ; les leads en retard y restent.
+    lateWatch = lateWatch.filter(w => !handled.has(w));
     saveLateWatch();
   } catch (e) {
     console.error('[late] erreur récap:', e.message);
@@ -6455,8 +6478,9 @@ setInterval(() => lateDigestCron().catch(e => console.error('[late] erreur:', e.
 // État du suivi (lecture seule) et déclenchement manuel du récap — derrière requireAdmin.
 app.get('/api/admin/late-watch', (req, res) => {
   const now = Date.now();
-  const due = lateWatch.filter(w => new Date(w.receivedAt).getTime() + CONFIG.DELAY_HOURS * 3600_000 <= now);
-  res.json({ enabled: CONFIG.LATE_NOTIF_ENABLED, watched: lateWatch.length, due: due.length, running: lateRunning });
+  const due = lateWatch.filter(w => new Date(w.receivedAt).getTime() + CONFIG.LATE_DELAY_HOURS * 3600_000 <= now);
+  res.json({ enabled: CONFIG.LATE_NOTIF_ENABLED, watched: lateWatch.length, due: due.length, running: lateRunning,
+    delayHours: CONFIG.LATE_DELAY_HOURS, digestHour: CONFIG.LATE_DIGEST_HOUR, to: CONFIG.LATE_NOTIF_EMAIL, from: CONFIG.LATE_NOTIF_FROM || CONFIG.SENDER_EMAIL });
 });
 app.post('/api/admin/late-digest-now', (req, res) => {
   if (!CONFIG.LATE_NOTIF_ENABLED) return res.status(409).json({ error: 'LATE_NOTIF_ENABLED=false' });
